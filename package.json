@@ -22,6 +22,9 @@
     "ascii"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "activationEvents": [
     "onLanguage:rust",
     "onCommand:rustOwnershipLens.runCheck",
@@ -107,6 +110,7 @@
         "rustOwnershipLens.cargoCommand": {
           "type": "string",
           "default": "cargo",
+          "scope": "machine-overridable",
           "description": "Cargo command path used by Rust Ownership Lens."
         },
         "rustOwnershipLens.cargoArgs": {
@@ -118,6 +122,7 @@
             "check",
             "--message-format=json"
           ],
+          "scope": "machine-overridable",
           "description": "Arguments passed to cargo. Keep --message-format=json so diagnostics can be parsed."
         },
         "rustOwnershipLens.maxDiagnostics": {
@@ -138,6 +143,16 @@
           "description": "Also include Rust warnings from cargo check output."
         }
       }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Rust Ownership Lens can run in untrusted workspaces, but workspace cargo command and argument overrides are ignored.",
+      "restrictedConfigurations": [
+        "rustOwnershipLens.cargoCommand",
+        "rustOwnershipLens.cargoArgs"
+      ]
     }
   }
 }

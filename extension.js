@@ -2,8 +2,12 @@
 
 const vscode = require('vscode');
 const cp = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const DEFAULT_CARGO_COMMAND = 'cargo';
+const DEFAULT_CARGO_ARGS = ['check', '--message-format=json'];
 
 const KNOWN_CODES = new Set([
   'E0106', // missing lifetime specifier
@@ -149,8 +153,9 @@ async function runCargoCheck() {
   }
 
   const config = vscode.workspace.getConfiguration('rustOwnershipLens');
-  const cargoCommand = config.get('cargoCommand', 'cargo');
-  const cargoArgs = config.get('cargoArgs', ['check', '--message-format=json']);
+  const cargoConfig = getCargoRunConfig(config, vscode.workspace.isTrusted !== false);
+  const cargoCommand = cargoConfig.cargoCommand;
+  const cargoArgs = cargoConfig.cargoArgs;
   const includeWarnings = config.get('includeWarnings', false);
   const maxDiagnostics = config.get('maxDiagnostics', 20);
 
@@ -158,6 +163,14 @@ async function runCargoCheck() {
   outputChannel.clear();
   outputChannel.appendLine(`Running: ${cargoCommand} ${cargoArgs.join(' ')}`);
   outputChannel.appendLine(`Workspace: ${folder.uri.fsPath}`);
+  if (cargoConfig.usedTrustedFallback) {
+    outputChannel.appendLine('Workspace Trust: ignored workspace cargoCommand/cargoArgs overrides in this untrusted workspace.');
+  }
+  if (!hasJsonMessageFormat(cargoArgs)) {
+    const warning = 'Rust Ownership Lens: rustOwnershipLens.cargoArgs is missing --message-format=json, so cargo diagnostics may not parse.';
+    outputChannel.appendLine(`Warning: ${warning}`);
+    vscode.window.showWarningMessage(warning);
+  }
   outputChannel.show(true);
   viewProvider.update(loadingHtml(folder.uri.fsPath, cargoCommand, cargoArgs), 'Running cargo check...');
 
@@ -231,9 +244,10 @@ function getWorkspaceFolder() {
 
 function runProcess(command, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = cp.spawn(command, args, {
+    const spawnCommand = resolveCommandForSpawn(command);
+    const child = cp.spawn(spawnCommand, args, {
       cwd,
-      shell: process.platform === 'win32',
+      shell: false,
       env: Object.assign({}, process.env, { CARGO_TERM_COLOR: 'never' })
     });
 
@@ -245,6 +259,100 @@ function runProcess(command, args, cwd) {
     child.on('error', reject);
     child.on('close', (exitCode) => resolve({ stdout, stderr, exitCode }));
   });
+}
+
+function getCargoRunConfig(config, workspaceTrusted) {
+  const commandResult = getRestrictedConfigurationValue(config, 'cargoCommand', DEFAULT_CARGO_COMMAND, workspaceTrusted);
+  const argsResult = getRestrictedConfigurationValue(config, 'cargoArgs', DEFAULT_CARGO_ARGS, workspaceTrusted);
+
+  return {
+    cargoCommand: normalizeCargoCommand(commandResult.value),
+    cargoArgs: normalizeCargoArgs(argsResult.value),
+    usedTrustedFallback: commandResult.usedTrustedFallback || argsResult.usedTrustedFallback
+  };
+}
+
+function getRestrictedConfigurationValue(config, key, defaultValue, workspaceTrusted) {
+  if (!workspaceTrusted && config && typeof config.inspect === 'function') {
+    const inspected = config.inspect(key);
+    if (hasWorkspaceConfigurationValue(inspected)) {
+      if (inspected.globalValue !== undefined) {
+        return { value: cloneConfigValue(inspected.globalValue), usedTrustedFallback: true };
+      }
+      if (inspected.defaultValue !== undefined) {
+        return { value: cloneConfigValue(inspected.defaultValue), usedTrustedFallback: true };
+      }
+      return { value: cloneConfigValue(defaultValue), usedTrustedFallback: true };
+    }
+  }
+
+  if (config && typeof config.get === 'function') {
+    return { value: cloneConfigValue(config.get(key, defaultValue)), usedTrustedFallback: false };
+  }
+  return { value: cloneConfigValue(defaultValue), usedTrustedFallback: false };
+}
+
+function hasWorkspaceConfigurationValue(inspected) {
+  return Boolean(
+    inspected &&
+    (inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined)
+  );
+}
+
+function normalizeCargoCommand(value) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return DEFAULT_CARGO_COMMAND;
+}
+
+function normalizeCargoArgs(value) {
+  if (!Array.isArray(value)) return DEFAULT_CARGO_ARGS.slice();
+  return value.map((arg) => String(arg));
+}
+
+function cloneConfigValue(value) {
+  return Array.isArray(value) ? value.slice() : value;
+}
+
+function hasJsonMessageFormat(args) {
+  if (!Array.isArray(args)) return false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = String(args[i]);
+    if (arg === '--message-format=json') return true;
+    if (arg.startsWith('--message-format=json')) return true;
+    if (arg === '--message-format' && args[i + 1] && String(args[i + 1]).startsWith('json')) return true;
+  }
+  return false;
+}
+
+function resolveCommandForSpawn(command, env = process.env, platform = process.platform, exists = fs.existsSync) {
+  if (platform !== 'win32') return command;
+
+  const winPath = path.win32;
+  const trimmed = String(command || '').trim();
+  if (!trimmed) return DEFAULT_CARGO_COMMAND;
+  if (winPath.extname(trimmed)) return trimmed;
+
+  const extensions = getWindowsPathExtensions(env);
+  const candidates = /[\\/]/.test(trimmed)
+    ? extensions.map((ext) => `${trimmed}${ext}`)
+    : getWindowsPathDirs(env).flatMap((dir) => extensions.map((ext) => winPath.join(dir, `${trimmed}${ext}`)));
+
+  for (const candidate of candidates) {
+    if (exists(candidate)) return candidate;
+  }
+
+  return `${trimmed}.exe`;
+}
+
+function getWindowsPathDirs(env) {
+  const pathValue = env.Path || env.PATH || '';
+  return pathValue.split(';').filter(Boolean);
+}
+
+function getWindowsPathExtensions(env) {
+  const pathext = env.PATHEXT || '.COM;.EXE;.BAT;.CMD';
+  const extensions = pathext.split(';').filter(Boolean);
+  return extensions.length > 0 ? extensions : ['.EXE'];
 }
 
 function parseCargoJsonMessages(raw) {
@@ -1181,6 +1289,9 @@ module.exports = {
     buildReport,
     buildHeuristicExplanation,
     heuristicFindings,
+    getCargoRunConfig,
+    hasJsonMessageFormat,
+    resolveCommandForSpawn,
     getCode,
     guessVariable,
   }
