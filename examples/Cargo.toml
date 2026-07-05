@@ -16,6 +16,10 @@ name = "e0373"
 path = "e0373.rs"
 
 [[bin]]
+name = "e0373-async"
+path = "e0373_async.rs"
+
+[[bin]]
 name = "e0277"
 path = "e0277.rs"
 

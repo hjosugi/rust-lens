@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const cp = require('node:child_process');
 const fs = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
@@ -314,6 +315,34 @@ test('cargo JSON fixture reports include the timeline and fix guidance', () => {
   assert.match(report, /Timeline from rustc spans:/);
   assert.match(report, /examples\/e0502\.rs:4:5/);
   assert.match(report, /Best fixes:/);
+});
+
+test('japanese language mode translates deterministic explanations', () => {
+  const rustDiagnostic = diagnostics.find((entry) => entry.code === 'E0499').diagnostic;
+  const report = _test.buildReport([rustDiagnostic], {
+    cwd: '/tmp/rust-lens',
+    exitCode: 101,
+    command: 'cargo check --message-format=json',
+    rawMessageCount: 1,
+    includeWarnings: false,
+    language: 'ja'
+  }).text;
+
+  assert.match(report, /問題:/);
+  assert.match(report, /修正候補:/);
+  assert.match(report, /mutable borrow/);
+});
+
+test('CLI explain reads fixture JSON and prints a report', () => {
+  const fixture = path.join(__dirname, 'fixtures', 'e0502.jsonl');
+  const result = cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'rust-lens.js'), 'explain', fixture], {
+    cwd: path.join(__dirname, '..'),
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Rust Ownership Lens/);
+  assert.match(result.stdout, /Issue 1: error\[E0502\]/);
 });
 
 test('duplicate diagnostics can be deduplicated when an export exists', () => {

@@ -122,6 +122,7 @@ let cargoRunInFlight = false;
 let cargoRunQueued = false;
 let lastRunCwd = '';
 let currentRunProcess;
+const rememberedWorkspacePackages = new Map();
 
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Rust Ownership Lens');
@@ -188,7 +189,11 @@ async function runCargoCheck() {
   const includeWarnings = config.get('includeWarnings', false);
   const maxDiagnostics = config.get('maxDiagnostics', 20);
   const timeoutSeconds = config.get('timeoutSeconds', 300);
-  const target = getRunTarget(config);
+  const language = normalizeLanguage(config.get('language', 'en'));
+  const reused = tryUseExistingDiagnostics(config, includeWarnings, maxDiagnostics, language);
+  if (reused) return;
+
+  const target = await getRunTarget(config);
   if (!target) {
     vscode.window.showWarningMessage('Open a Rust workspace folder or a Rust source file first.');
     return;
@@ -234,7 +239,8 @@ async function runCargoCheck() {
               command: `${target.command} ${target.args.join(' ')}`,
               rawMessageCount: messages.length,
               includeWarnings,
-              mode: target.description
+              mode: target.description,
+              language
             });
             viewProvider.update(partial.html, partial.text);
           }
@@ -263,7 +269,8 @@ async function runCargoCheck() {
       command: `${target.command} ${target.args.join(' ')}`,
       rawMessageCount: messages.length,
       includeWarnings,
-      mode: target.description
+      mode: target.description,
+      language
     });
 
     lastReportText = report.text;
@@ -320,7 +327,7 @@ function getWorkspaceFolder() {
   return undefined;
 }
 
-function getRunTarget(config) {
+async function getRunTarget(config) {
   const folder = getWorkspaceFolder();
   const editor = vscode.window.activeTextEditor;
   const activeRustFile = editor && editor.document && editor.document.languageId === 'rust'
@@ -331,14 +338,21 @@ function getRunTarget(config) {
 
   if (cargoRoot) {
     const cargoConfig = getCargoRunConfig(config, vscode.workspace.isTrusted !== false);
+    const packageSelection = await selectWorkspacePackage(cargoRoot, activeRustFile);
+    const cargoArgs = packageSelection && packageSelection.name
+      ? addPackageArgs(cargoConfig.cargoArgs, packageSelection.name)
+      : cargoConfig.cargoArgs;
     return {
-      label: cargoConfig.cargoArgs[0] === 'clippy' ? 'cargo clippy' : 'cargo check',
+      label: cargoArgs[0] === 'clippy' ? 'cargo clippy' : 'cargo check',
       command: cargoConfig.cargoCommand,
-      args: cargoConfig.cargoArgs,
+      args: cargoArgs,
       cwd: cargoRoot,
       usedTrustedFallback: cargoConfig.usedTrustedFallback,
-      requiresJsonWarning: !hasJsonMessageFormat(cargoConfig.cargoArgs),
-      description: cargoConfig.cargoArgs[0] === 'clippy' ? 'cargo clippy mode' : 'cargo workspace mode'
+      requiresJsonWarning: !hasJsonMessageFormat(cargoArgs),
+      description: [
+        cargoArgs[0] === 'clippy' ? 'cargo clippy mode' : 'cargo workspace mode',
+        packageSelection && packageSelection.name ? `package ${packageSelection.name}` : ''
+      ].filter(Boolean).join(', ')
     };
   }
 
@@ -368,6 +382,80 @@ function getRunTarget(config) {
   return undefined;
 }
 
+async function selectWorkspacePackage(cargoRoot, activeRustFile) {
+  const packages = readWorkspacePackages(cargoRoot);
+  if (packages.length <= 1) return undefined;
+  const remembered = rememberedWorkspacePackages.get(cargoRoot);
+  const inferred = packages.find((pkg) => activeRustFile && activeRustFile.startsWith(pkg.dir + path.sep));
+  const preferred = remembered || (inferred && inferred.name) || '';
+
+  if (!vscode.window || typeof vscode.window.showQuickPick !== 'function') {
+    return preferred ? packages.find((pkg) => pkg.name === preferred) : undefined;
+  }
+
+  const picks = [
+    { label: 'All workspace packages', name: '' },
+    ...packages.map((pkg) => ({
+      label: pkg.name === preferred ? `${pkg.name} (current)` : pkg.name,
+      description: path.relative(cargoRoot, pkg.dir) || '.',
+      name: pkg.name
+    }))
+  ];
+  const selected = await vscode.window.showQuickPick(picks, {
+    title: 'Rust Ownership Lens package',
+    placeHolder: 'Select package for cargo check, or run the full workspace'
+  });
+  if (!selected) return undefined;
+  rememberedWorkspacePackages.set(cargoRoot, selected.name);
+  return selected.name ? packages.find((pkg) => pkg.name === selected.name) : undefined;
+}
+
+function readWorkspacePackages(cargoRoot) {
+  const manifestPath = path.join(cargoRoot, 'Cargo.toml');
+  const manifest = readTextFile(manifestPath);
+  if (!manifest) return [];
+  const members = parseWorkspaceMembers(manifest);
+  if (members.length === 0) {
+    const name = parsePackageName(manifest);
+    return name ? [{ name, dir: cargoRoot }] : [];
+  }
+  return members
+    .map((member) => path.resolve(cargoRoot, member))
+    .map((dir) => {
+      const memberManifest = readTextFile(path.join(dir, 'Cargo.toml'));
+      const name = parsePackageName(memberManifest);
+      return name ? { name, dir } : undefined;
+    })
+    .filter(Boolean);
+}
+
+function readTextFile(fileName) {
+  try {
+    return fs.readFileSync(fileName, 'utf8');
+  } catch (_) {
+    return '';
+  }
+}
+
+function parseWorkspaceMembers(manifest) {
+  const match = manifest.match(/(?:^|\n)\s*members\s*=\s*\[([\s\S]*?)\]/);
+  if (!match) return [];
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+}
+
+function parsePackageName(manifest) {
+  if (!manifest) return '';
+  const packageSection = manifest.match(/(?:^|\n)\s*\[package\]([\s\S]*?)(?:\n\s*\[|$)/);
+  const source = packageSection ? packageSection[1] : manifest;
+  const name = source.match(/(?:^|\n)\s*name\s*=\s*"([^"]+)"/);
+  return name ? name[1] : '';
+}
+
+function addPackageArgs(args, packageName) {
+  if (!packageName || args.includes('-p') || args.includes('--package')) return args;
+  return args.concat(['-p', packageName]);
+}
+
 function findCargoRoot(startDir, workspacePath) {
   if (!startDir) return '';
   let current = startDir;
@@ -384,6 +472,10 @@ function findCargoRoot(startDir, workspacePath) {
 function normalizeRustEdition(value) {
   const edition = String(value || '').trim();
   return ['2015', '2018', '2021', '2024'].includes(edition) ? edition : '2024';
+}
+
+function normalizeLanguage(value) {
+  return value === 'ja' ? 'ja' : 'en';
 }
 
 function runWithProgress(title, task) {
@@ -584,6 +676,85 @@ function extractDiagnostics(messages, includeWarnings) {
   return diagnostics;
 }
 
+function tryUseExistingDiagnostics(config, includeWarnings, maxDiagnostics, language) {
+  const source = config.get('diagnosticSource', 'auto');
+  if (source === 'cargo') return false;
+  if (!vscode.languages || typeof vscode.languages.getDiagnostics !== 'function') return false;
+
+  const diagnostics = [];
+  for (const [uri, items] of vscode.languages.getDiagnostics()) {
+    if (!uri || !uri.fsPath || !uri.fsPath.endsWith('.rs')) continue;
+    for (const item of items || []) {
+      const code = codeFromVsCodeDiagnostic(item);
+      if (!code || (!KNOWN_CODES.has(code) && !code.startsWith('clippy::'))) continue;
+      if (item.severity === vscode.DiagnosticSeverity.Warning && !includeWarnings) continue;
+      if (!isRustDiagnosticSource(item.source) && source === 'rust-analyzer') continue;
+      diagnostics.push(vscodeDiagnosticToRustDiagnostic(uri.fsPath, item, code));
+    }
+  }
+
+  const selected = prioritizeDiagnostics(diagnostics, maxDiagnostics);
+  if (selected.length === 0) return false;
+
+  lastDiagnostics = selected;
+  lastRunCwd = getWorkspaceFolder() && getWorkspaceFolder().uri ? getWorkspaceFolder().uri.fsPath : process.cwd();
+  const report = buildReport(selected, {
+    cwd: lastRunCwd,
+    exitCode: 'reused',
+    command: 'VS Code diagnostics',
+    rawMessageCount: selected.length,
+    includeWarnings,
+    mode: 'existing rust-analyzer/rustc diagnostics',
+    language
+  });
+  lastReportText = report.text;
+  lastReportHtml = report.html;
+  outputChannel.clear();
+  outputChannel.appendLine('Reused existing VS Code diagnostics; cargo was not run.');
+  outputChannel.appendLine(report.text);
+  viewProvider.update(report.html, report.text);
+  publishDiagnostics(selected, lastRunCwd);
+  updateInlineTimelineDecorations(selected, lastRunCwd);
+  statusBarItem.text = `$(warning) Rust Lens ${selected.length}`;
+  return true;
+}
+
+function codeFromVsCodeDiagnostic(diagnostic) {
+  if (!diagnostic) return '';
+  if (typeof diagnostic.code === 'string') return diagnostic.code;
+  if (diagnostic.code && typeof diagnostic.code.value === 'string') return diagnostic.code.value;
+  if (diagnostic.code && typeof diagnostic.code.code === 'string') return diagnostic.code.code;
+  const match = String(diagnostic.message || '').match(/\b(E\d{4}|clippy::[A-Za-z0-9_]+)\b/);
+  return match ? match[1] : '';
+}
+
+function isRustDiagnosticSource(source) {
+  const value = String(source || '').toLowerCase();
+  return !value || value.includes('rust') || value.includes('rust-analyzer') || value.includes('clippy');
+}
+
+function vscodeDiagnosticToRustDiagnostic(fileName, diagnostic, code) {
+  const range = diagnostic.range;
+  const start = range && range.start ? range.start : { line: 0, character: 0 };
+  const end = range && range.end ? range.end : start;
+  return {
+    level: diagnostic.severity === vscode.DiagnosticSeverity.Warning ? 'warning' : 'error',
+    code: { code },
+    message: diagnostic.message || code,
+    spans: [{
+      file_name: fileName,
+      line_start: start.line + 1,
+      line_end: end.line + 1,
+      column_start: start.character + 1,
+      column_end: Math.max(start.character + 2, end.character + 1),
+      is_primary: true,
+      label: diagnostic.message || code,
+      text: []
+    }],
+    children: []
+  };
+}
+
 function deduplicateDiagnostics(diagnostics) {
   const unique = [];
   const seen = new Set();
@@ -642,7 +813,7 @@ function buildReport(diagnostics, meta) {
     }
   } else {
     for (let i = 0; i < known.length; i += 1) {
-      parts.push(renderDiagnosticExplanation(known[i], i + 1));
+      parts.push(renderDiagnosticExplanation(known[i], i + 1, normalizeLanguage(meta.language)));
       parts.push('');
     }
 
@@ -663,7 +834,7 @@ function buildReport(diagnostics, meta) {
   };
 }
 
-function renderDiagnosticExplanation(diagnostic, index) {
+function renderDiagnosticExplanation(diagnostic, index, language = 'en') {
   const code = getCode(diagnostic);
   const message = diagnostic.message || '(no message)';
   const primary = getPrimarySpan(diagnostic);
@@ -691,7 +862,7 @@ function renderDiagnosticExplanation(diagnostic, index) {
     lines.push('');
   }
 
-  const template = templateForDiagnostic(code, variable, diagnostic, events);
+  const template = templateForDiagnostic(code, variable, diagnostic, events, language);
   lines.push(template.trimEnd());
 
   const suggestions = collectSuggestions(diagnostic, code, variable);
@@ -704,7 +875,11 @@ function renderDiagnosticExplanation(diagnostic, index) {
   return lines.join('\n');
 }
 
-function templateForDiagnostic(code, variable, diagnostic, events) {
+function templateForDiagnostic(code, variable, diagnostic, events, language = 'en') {
+  if (language === 'ja') {
+    return japaneseTemplateForDiagnostic(code, variable, diagnostic, events);
+  }
+
   const v = variable || 'this value';
   const timeline = renderEventTimeline(events, v);
 
@@ -948,6 +1123,261 @@ function templateForDiagnostic(code, variable, diagnostic, events) {
   }
 }
 
+function japaneseTemplateForDiagnostic(code, variable, diagnostic, events) {
+  const v = variable || 'この値';
+  const timeline = renderEventTimeline(events, v);
+
+  if (isClippyCloneDiagnostic(diagnostic)) {
+    return [
+      '問題:',
+      '  Clippy は、不要な `clone()` や `to_owned()` の可能性を見つけました。',
+      '',
+      'Clone ASCII:',
+      '```text',
+      'value ---- clone() ----> 新しい所有値',
+      '&value ---------------> 借用だけで読む',
+      '```',
+      '',
+      timeline,
+      '',
+      '修正候補:',
+      '  A. 元の値を move できるなら clone を消す。',
+      '  B. 読むだけなら `&value` で借用する。',
+      '  C. 本当に 2 つの owner が必要な場合だけ clone を残す。',
+      '  D. 自動適用は MachineApplicable な Clippy suggestion に限定する。'
+    ].join('\n');
+  }
+
+  switch (code) {
+    case 'E0106':
+      return [
+        '問題:',
+        '  返す参照、または保持する参照が、どの入力・所有者から来たものか lifetime で示されていません。',
+        '',
+        'Lifetime ASCII:',
+        '```text',
+        'fn f(...) -> &str',
+        '             ^--- 何から借りた参照か不明 X',
+        'input:  ----- ここまで生存 ----->',
+        'output: 十分長く生きるデータを指す必要がある',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. 参照ではなく `String` などの owned data を返す。',
+        '  B. 入力由来の参照なら `fn f<\'a>(x: &\'a T) -> &\'a str` のように結びつける。',
+        '  C. 関数内で作った値への参照を返さない。',
+        '  D. 参照を持つ struct は owned data にできないか検討する。'
+      ].join('\n');
+
+    case 'E0277':
+      return [
+        '問題:',
+        `  ${v} に必要な trait bound が満たされていません。Rust はその型が特定の trait を実装している必要があると判断しました。`,
+        '',
+        'Trait bound ASCII:',
+        '```text',
+        'generic code: T: Trait が必要',
+        'actual type:  T',
+        '              ^ trait 実装または bound が不足 X',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. `T: Clone` や `T: Debug` のように generic の宣言へ bound を足す。',
+        '  B. 読むだけなら `&T` を渡す設計にする。',
+        '  C. 型がその能力を持つべきなら derive または impl する。',
+        '  D. `Send` や `\'static` の場合は owned data を task に move するか `Arc<T>` を使う。'
+      ].join('\n');
+
+    case 'E0373':
+      return [
+        '問題:',
+        '  closure または async block が現在の関数より長く生きる可能性があり、local data を借用しています。',
+        '',
+        'Async lifetime ASCII:',
+        '```text',
+        'current frame: [local data] ---- ここで drop',
+        'closure/task:              後で実行される可能性 ---->',
+        'local data への借用が境界を越える X',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. `move` または `async move` で必要な data を task/closure に所有させる。',
+        '  B. 小さい owned value は spawn 前に clone して渡す。',
+        '  C. 共有読み取りには `Arc<T>` を使う。',
+        '  D. 共有 mutation が本当に必要なときだけ `Arc<Mutex<T>>` などを使う。'
+      ].join('\n');
+
+    case 'E0382':
+      if (isForLoopIteratorMoveDiagnostic(diagnostic)) {
+        return iteratorMoveTemplate(v, diagnostic, events);
+      }
+      return [
+        '問題:',
+        `  ${v} は move されたあと、もう一度使われています。`,
+        '',
+        'Ownership ASCII:',
+        '```text',
+        `${v} owns data`,
+        `${v} ---- move ----> new owner`,
+        `${v} = invalid`,
+        `use ${v} later: X`,
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. 読むだけなら `&value` で参照を渡す。',
+        '  B. move の前に最後の使用を済ませる。',
+        '  C. 本当に必要な小さい部分だけ clone する。',
+        '  D. 関数側を ownership ではなく borrow で受け取る設計にする。'
+      ].join('\n');
+
+    case 'E0499':
+      return [
+        '問題:',
+        `  ${v} に対する mutable borrow が同時に 2 つ存在しています。`,
+        '',
+        'Borrow ASCII:',
+        '```text',
+        `${v}:  ---- mutable borrow #1 ----+`,
+        `${v}:        mutable borrow #2 X  |`,
+        'Only one mutable borrow can be active at a time.',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. 1 つ目の `&mut` を使い終えてから 2 つ目を作る。',
+        '  B. scope を分けて borrow を早く終わらせる。',
+        '  C. 別々の要素を編集したいなら `split_at_mut` などを使う。',
+        '  D. 共有 mutable state が本当に必要な場合だけ `RefCell` や `Mutex` を検討する。'
+      ].join('\n');
+
+    case 'E0502':
+      return [
+        '問題:',
+        `  ${v} が immutable borrow されている間に、mutable borrow しようとしています。`,
+        '',
+        'Borrow ASCII:',
+        '```text',
+        `${v}:  ---- immutable borrow ----+`,
+        `${v}:        mutable borrow X    |`,
+        'The read borrow and write borrow overlap.',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. immutable reference を使い終えてから元の値を変更する。',
+        '  B. mutation を immutable borrow の最後の使用より後に移す。',
+        '  C. 長く保持する必要がある小さい field だけ clone する。',
+        '  D. `{ ... }` で scope を分け、borrow を早く終わらせる。'
+      ].join('\n');
+
+    case 'E0505':
+      return [
+        '問題:',
+        `  ${v} はまだ borrow されている間に move されています。`,
+        '',
+        'Ownership / borrow ASCII:',
+        '```text',
+        `${v}:  ---- borrowed ----+`,
+        `${v}:        move X      |`,
+        'The borrow must end before the move.',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. borrow を使い終えてから値を move する。',
+        '  B. borrow の scope を小さくする。',
+        '  C. 後続処理を move ではなく borrow に変える。',
+        '  D. 参照を返すのではなく owned data を返す。'
+      ].join('\n');
+
+    case 'E0515':
+      return [
+        '問題:',
+        '  関数内で所有されている local data への参照を返そうとしています。',
+        '',
+        'Lifetime ASCII:',
+        '```text',
+        'fn frame starts',
+        '+------------------------------+',
+        '| local value owns the data     |',
+        '| return reference ----+        |',
+        '+----------------------|-------+',
+        '                       v',
+        'local value is dropped here',
+        'returned reference points to dead data X',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. `&str` ではなく `String` など owned data を返す。',
+        '  B. 入力 parameter 由来の参照を返す。',
+        '  C. 返す参照が指す data を関数外に置く。',
+        '  D. lifetime annotation だけで直そうとしない。'
+      ].join('\n');
+
+    case 'E0597':
+      return [
+        '問題:',
+        `  ${v} は、その参照が必要とする期間まで生きていません。`,
+        '',
+        'Lifetime ASCII:',
+        '```text',
+        `${v}:      alive ----+`,
+        'reference:       needs data -------->',
+        '                 data drops too early X',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. owned value をより外側の scope に移す。',
+        '  B. borrowed reference ではなく owned data を返す。',
+        '  C. temporary value から借用しない。',
+        '  D. async task では `async move` で owned data を task に渡す。'
+      ].join('\n');
+
+    case 'E0716':
+      return [
+        '問題:',
+        '  temporary value を borrow していますが、その temporary が早く drop されます。',
+        '',
+        'Temporary lifetime ASCII:',
+        '```text',
+        'temporary value:  alive --+',
+        'borrow:                needs data ---->',
+        '                       temporary dropped X',
+        '```',
+        '',
+        timeline,
+        '',
+        '修正候補:',
+        '  A. temporary を名前付き変数に保存する。',
+        '  B. owner が reference より長く生きるようにする。',
+        '  C. temporary への参照ではなく owned data を返す。'
+      ].join('\n');
+
+    default:
+      return [
+        '問題:',
+        `  ${diagnostic.message || '不明な Rust diagnostic'}`,
+        '',
+        timeline || 'Timeline はまだありません。'
+      ].join('\n');
+  }
+}
+
 function iteratorMoveTemplate(variable, diagnostic, events) {
   const context = findForLoopIteratorMoveContext(diagnostic, variable);
   const collection = context.collection || variable || 'collection';
@@ -980,6 +1410,40 @@ function iteratorMoveTemplate(variable, diagnostic, events) {
     `  A. Read only: change to \`for ${item} in &${collection} { ... }\`.`,
     `  B. Mutate elements: change to \`for ${item} in &mut ${collection} { ... }\`.`,
     `  C. Consume intentionally: keep \`for ${item} in ${collection}\` and do not use ${collection} after the loop.`
+  ].join('\n');
+}
+
+function japaneseIteratorMoveTemplate(variable, diagnostic, events) {
+  const context = findForLoopIteratorMoveContext(diagnostic, variable);
+  const collection = context.collection || variable || 'collection';
+  const item = context.item || 'item';
+  const timeline = renderEventTimeline(events, collection);
+
+  return [
+    '問題:',
+    `  \`for ${item} in ${collection}\` が \`.into_iter()\` を呼び、${collection} を move しました。その後でもう一度 ${collection} を使っています。`,
+    '',
+    'Iterator ownership ASCII:',
+    '```text',
+    `${collection} before loop: owns Vec<T>`,
+    `for ${item} in ${collection}`,
+    `${collection} moved into the loop iterator`,
+    `later use of ${collection}: X`,
+    '```',
+    '',
+    'Iterator choices:',
+    '```text',
+    `for ${item} in ${collection}      -> into_iter(), collection を move`,
+    `for ${item} in &${collection}     -> iter(), borrowed items を読む`,
+    `for ${item} in &mut ${collection} -> iter_mut(), Vec を move せず要素を編集`,
+    '```',
+    '',
+    timeline,
+    '',
+    '修正候補:',
+    `  A. 読むだけなら \`for ${item} in &${collection} { ... }\` に変える。`,
+    `  B. 要素を変更するなら \`for ${item} in &mut ${collection} { ... }\` に変える。`,
+    `  C. consume する意図なら \`for ${item} in ${collection}\` のままにし、loop 後に ${collection} を使わない。`
   ].join('\n');
 }
 

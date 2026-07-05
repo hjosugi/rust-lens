@@ -12,6 +12,7 @@ This project follows Keep a Changelog-style sections: Added, Changed, Fixed, and
 - Added Japanese README.
 - Added Problems panel diagnostics, clickable report locations, and inline ownership timeline decorations.
 - Added run-on-save, timeout, cancellation, single-file `rustc`, Clippy, `cargo tree`, `cargo expand`, `rustc --explain`, and optional VS Code Language Model helper flows.
+- Added `rust-lens explain` CLI, Japanese deterministic templates, workspace package selection, and existing diagnostic reuse.
 - Added examples and tests for E0499, E0505, E0597, and E0716.
 
 ### Changed

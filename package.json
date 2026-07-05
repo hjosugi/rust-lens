@@ -31,6 +31,9 @@
     "ascii"
   ],
   "main": "./extension.js",
+  "bin": {
+    "rust-lens": "./bin/rust-lens.js"
+  },
   "scripts": {
     "test": "node --test",
     "test:rust-compat": "node scripts/check-rust-compat.js",
@@ -206,6 +209,25 @@
             "2024"
           ],
           "description": "Rust edition used when checking a standalone .rs file without Cargo.toml."
+        },
+        "rustOwnershipLens.language": {
+          "type": "string",
+          "default": "en",
+          "enum": [
+            "en",
+            "ja"
+          ],
+          "description": "Language used for deterministic explanations."
+        },
+        "rustOwnershipLens.diagnosticSource": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cargo",
+            "rust-analyzer"
+          ],
+          "description": "Use existing rust-analyzer/rustc diagnostics when available, or always run cargo/rustc."
         }
       }
     }

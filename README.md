@@ -19,6 +19,8 @@ It is designed as a developer tool for people who are new to Rust but still need
 - Can run on save with debouncing and single-flight process control.
 - Can fall back to `rustc` for standalone `.rs` files without `Cargo.toml`.
 - Can run `cargo clippy`, `cargo tree`, `cargo expand`, and `rustc --explain` helper flows.
+- Can reuse existing rust-analyzer/rustc diagnostics instead of launching cargo when available.
+- Can generate reports from a CLI with `rust-lens explain`.
 - Can explain a selected Rust snippet with heuristic rules.
 
 ## Supported errors in this prototype
@@ -71,6 +73,15 @@ Offline fallback that uses `zip` instead of `vsce`:
 
 ```bash
 npm run package:offline
+```
+
+## CLI
+
+After installing package dependencies, the CLI can read cargo/rustc JSON from stdin or files:
+
+```bash
+cargo check --message-format=json 2>&1 | npx rust-lens explain
+rust-lens explain --json cargo-output.jsonl
 ```
 
 ## Install from zip folder
@@ -145,6 +156,8 @@ Best fixes:
 | `rustOwnershipLens.runOnSave` | `false` | Re-run diagnostics when a Rust file is saved. |
 | `rustOwnershipLens.timeoutSeconds` | `300` | Stop long-running cargo/rustc checks after this many seconds. |
 | `rustOwnershipLens.singleFileEdition` | `2024` | Edition used for standalone `.rs` fallback checks. |
+| `rustOwnershipLens.language` | `en` | Explanation language: `en` or `ja`. |
+| `rustOwnershipLens.diagnosticSource` | `auto` | Reuse existing rust-analyzer/rustc diagnostics when possible, or always run cargo/rustc. |
 
 ## Visual preview
 

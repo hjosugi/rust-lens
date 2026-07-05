@@ -18,6 +18,9 @@ trap cleanup EXIT
 mkdir -p "${tmpdir}/extension"
 cp "${repo_root}/package.json" "${tmpdir}/extension/package.json"
 cp "${repo_root}/extension.js" "${tmpdir}/extension/extension.js"
+if [[ -d "${repo_root}/bin" ]]; then
+  cp -R "${repo_root}/bin" "${tmpdir}/extension/bin"
+fi
 cp "${repo_root}/README.md" "${tmpdir}/extension/README.md"
 if [[ -f "${repo_root}/README.ja.md" ]]; then
   cp "${repo_root}/README.ja.md" "${tmpdir}/extension/README.ja.md"

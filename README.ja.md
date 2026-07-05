@@ -14,6 +14,8 @@ Rust Ownership Lens は、Rust の ownership / borrow / lifetime エラーを VS
 - rustc suggestion と安全な iterator borrow rewrite を Quick Fix として提示する
 - `Cargo.toml` がない単一 `.rs` ファイルでは `rustc` にフォールバックする
 - `cargo clippy`, `cargo tree`, `cargo expand`, `rustc --explain` を補助的に呼び出す
+- rust-analyzer / rustc の既存 diagnostics があれば cargo を二重実行せず再利用する
+- `rust-lens explain` CLI で cargo/rustc JSON からレポートを生成する
 
 ## 使い方
 
@@ -25,8 +27,15 @@ Rust Ownership Lens は、Rust の ownership / borrow / lifetime エラーを VS
 
 ```json
 {
-  "rustOwnershipLens.runOnSave": true
+  "rustOwnershipLens.runOnSave": true,
+  "rustOwnershipLens.language": "ja"
 }
+```
+
+CLI:
+
+```bash
+cargo check --message-format=json 2>&1 | npx rust-lens explain
 ```
 
 ## VSIX の作成

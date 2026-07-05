@@ -20,6 +20,8 @@ cargo check --message-format=json
   -> Webview panel / OutputChannel / Problems integration
 ```
 
+The same parser/report path is also available from `rust-lens explain`, so editor-independent consumers can pipe cargo/rustc JSON into the tool without starting VS Code.
+
 Current implementation details:
 
 - `runCargoCheck` runs the configured cargo command in the active workspace.
@@ -41,6 +43,7 @@ The prototype currently lives in `extension.js`, but the logical boundaries are:
 - **Explainers:** error-code templates, iterator-move specialization, rustc child messages, fallback compact diagnostics.
 - **Timeline:** span classification (`borrow`, `move`, `drop`, `use`, `return`, `primary error`) and ASCII rendering.
 - **Presentation:** Webview HTML, OutputChannel text, status bar state, hover hints, code actions, future Problems bridge.
+- **CLI:** `bin/rust-lens.js` is a thin entrypoint over the parser/report builder for `rust-lens explain [--json]`.
 - **Heuristics:** selected-code explanations and lightweight hovers. These must be clearly labeled as heuristic and secondary to cargo output.
 - **Tests and compatibility checks:** Node tests for parser/config/template behavior and script checks against real rustc JSON.
 
@@ -89,6 +92,6 @@ Unknown diagnostics should remain visible as compact compiler diagnostics so use
 
 ### CLI, LSP
 
-- Extract the parser and report builder into a CLI-friendly core.
+- Keep the CLI contract stable, then extract the parser and report builder into a dedicated package when the public shape settles.
 - Consider an LSP or diagnostic bridge only after the core format is stable.
 - Publish Problems entries and machine-readable output from the same compiler-derived model used by the Webview.
