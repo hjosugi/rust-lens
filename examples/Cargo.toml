@@ -3,6 +3,7 @@ name = "rust-ownership-lens-examples"
 version = "0.1.0"
 edition = "2021"
 
+license = "0BSD"
 [[bin]]
 name = "e0502"
 path = "e0502.rs"

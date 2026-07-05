@@ -4,7 +4,7 @@
   "description": "Explain Rust ownership, borrowing, lifetime, iterator, and async errors with ASCII timelines.",
   "version": "0.1.0",
   "publisher": "hjosugi",
-  "license": "MIT",
+  "license": "0BSD",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",

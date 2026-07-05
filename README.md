@@ -188,3 +188,7 @@ This is an MVP prototype.
 - Team rules such as "prefer borrow over clone".
 - PR bot output for GitHub comments.
 - Async-specific explanations for `Send`, `'static`, and `async move`.
+
+## License
+
+0BSD. You can use, copy, modify, and distribute this project for almost any purpose.
