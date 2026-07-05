@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Node and rustc JSON (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+      - name: Run Node tests
+        run: npm test
+      - name: Check extension syntax
+        run: node --check extension.js
+      - name: Check rustc JSON compatibility
+        run: npm run test:rust-compat
+
+  msrv:
+    name: Minimum supported rustc
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install minimum Rust
+        run: |
+          rustup toolchain install 1.75.0 --profile minimal
+          rustup default 1.75.0
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+      - name: Run Node tests
+        run: npm test
+      - name: Check extension syntax
+        run: node --check extension.js
+      - name: Check rustc JSON compatibility on MSRV
+        run: npm run test:rust-compat
+        env:
+          RUST_LENS_SKIP_RUSTUP_OVERRIDE: "1"

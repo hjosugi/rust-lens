@@ -23,7 +23,8 @@
   ],
   "main": "./extension.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:rust-compat": "node scripts/check-rust-compat.js"
   },
   "activationEvents": [
     "onLanguage:rust",

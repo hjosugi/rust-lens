@@ -23,6 +23,14 @@ It is designed as a developer tool for people who are new to Rust but still need
 - `E0597`: borrowed value does not live long enough
 - `E0716`: temporary value dropped while borrowed
 
+## Compatibility
+
+- Minimum supported Rust compiler: `rustc 1.75.0`.
+- CI runs the extension tests on Ubuntu, macOS, and Windows.
+- CI also checks the intentionally failing `examples/iterator-move.rs` target against real rustc JSON output.
+- The parser accepts rustc diagnostics with or without the newer `$message_type` field.
+- Rustup workspace overrides are supported because the extension runs `cargo` in the active workspace directory, so local `rust-toolchain.toml` files are honored by rustup.
+
 ## Install from VSIX
 
 If you have the `.vsix` file:

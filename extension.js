@@ -440,7 +440,7 @@ function renderDiagnosticExplanation(diagnostic, index) {
   const message = diagnostic.message || '(no message)';
   const primary = getPrimarySpan(diagnostic);
   const variable = guessVariable(diagnostic);
-  const file = primary ? `${primary.file_name}:${primary.line_start}:${primary.column_start}` : '(unknown file)';
+  const file = formatSpanLocation(primary);
   const events = buildEvents(diagnostic);
   const source = sourceSnippet(primary);
 
@@ -836,7 +836,7 @@ function collectSuggestions(diagnostic, code, variable) {
     const spans = Array.isArray(child.spans) ? child.spans : [];
     for (const span of spans) {
       if (span && span.suggested_replacement) {
-        addSuggestion(`replace code at ${span.file_name}:${span.line_start} with \`${span.suggested_replacement}\``);
+        addSuggestion(`replace code at ${formatDiagnosticPath(span.file_name)}:${span.line_start} with \`${span.suggested_replacement}\``);
       }
     }
   }
@@ -930,8 +930,23 @@ function diagnosticSpans(diagnostic) {
 function formatCompactDiagnostic(diagnostic) {
   const code = getCode(diagnostic) || 'no-code';
   const primary = getPrimarySpan(diagnostic);
-  const location = primary ? `${primary.file_name}:${primary.line_start}:${primary.column_start}` : '(unknown location)';
+  const location = formatSpanLocation(primary);
   return [`[${diagnostic.level || 'diagnostic'} ${code}] ${diagnostic.message || ''}`, `  at ${location}`].join('\n');
+}
+
+function formatSpanLocation(span) {
+  if (!span) return '(unknown location)';
+  const file = formatDiagnosticPath(span.file_name || '(unknown file)');
+  const line = span.line_start || '?';
+  const column = span.column_start || '?';
+  return `${file}:${line}:${column}`;
+}
+
+function formatDiagnosticPath(fileName) {
+  const value = String(fileName || '');
+  if (/^\\\\\?\\UNC\\/i.test(value)) return `\\\\${value.slice(8)}`;
+  if (/^\\\\\?\\/i.test(value)) return value.slice(4);
+  return value;
 }
 
 function getCode(diagnostic) {
@@ -1466,6 +1481,8 @@ module.exports = {
     resolveCommandForSpawn,
     getCode,
     guessVariable,
+    formatDiagnosticPath,
+    formatSpanLocation,
     isForLoopIteratorMoveDiagnostic,
     parseMovableForLoopLine,
   }

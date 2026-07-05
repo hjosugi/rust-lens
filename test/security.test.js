@@ -78,6 +78,63 @@ test('message format detection accepts cargo json forms', () => {
   assert.equal(_test.hasJsonMessageFormat(['check']), false);
 });
 
+test('diagnostic extraction accepts rustc JSON with and without message_type', () => {
+  const wrappedDiagnostic = {
+    reason: 'compiler-message',
+    message: {
+      level: 'error',
+      code: { code: 'E0502' },
+      message: 'cannot borrow `users` as mutable because it is also borrowed as immutable',
+      spans: []
+    }
+  };
+  const directNewDiagnostic = {
+    $message_type: 'diagnostic',
+    level: 'warning',
+    code: { code: 'unused_variables' },
+    message: 'unused variable: `x`',
+    spans: []
+  };
+  const directOldDiagnostic = {
+    level: 'error',
+    code: { code: 'E0382' },
+    message: 'borrow of moved value: `name`',
+    spans: []
+  };
+
+  assert.deepEqual(
+    _test.extractDiagnostics([wrappedDiagnostic, directNewDiagnostic, directOldDiagnostic], false),
+    [wrappedDiagnostic.message, directOldDiagnostic]
+  );
+  assert.deepEqual(
+    _test.extractDiagnostics([wrappedDiagnostic, directNewDiagnostic, directOldDiagnostic], true),
+    [wrappedDiagnostic.message, directNewDiagnostic, directOldDiagnostic]
+  );
+});
+
+test('Windows diagnostic locations keep backslashes and strip extended prefixes', () => {
+  assert.equal(
+    _test.formatSpanLocation({
+      file_name: 'C:\\repo\\src\\main.rs',
+      line_start: 7,
+      column_start: 9
+    }),
+    'C:\\repo\\src\\main.rs:7:9'
+  );
+  assert.equal(
+    _test.formatSpanLocation({
+      file_name: '\\\\?\\C:\\repo\\src\\main.rs',
+      line_start: 8,
+      column_start: 4
+    }),
+    'C:\\repo\\src\\main.rs:8:4'
+  );
+  assert.equal(
+    _test.formatDiagnosticPath('\\\\?\\UNC\\server\\share\\src\\main.rs'),
+    '\\\\server\\share\\src\\main.rs'
+  );
+});
+
 test('Windows spawn command resolution finds cargo.exe without shell expansion', () => {
   const env = {
     Path: 'C:\\Rust\\.cargo\\bin;C:\\Windows\\System32',
