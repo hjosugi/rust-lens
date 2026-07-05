@@ -1,5 +1,7 @@
 # Rust Ownership Lens
 
+[![CI](https://github.com/hjosugi/rust-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/hjosugi/rust-lens/actions/workflows/ci.yml)
+
 Rust Ownership Lens is a VS Code extension prototype that explains Rust ownership, borrowing, lifetime, iterator, and async errors with plain text and ASCII timelines.
 
 It is designed as a developer tool for people who are new to Rust but still need to work inside real Rust projects.
@@ -10,11 +12,20 @@ It is designed as a developer tool for people who are new to Rust but still need
 - Parses Rust compiler JSON diagnostics.
 - Explains common ownership and lifetime errors.
 - Shows ASCII timelines in a VS Code side panel.
+- Publishes compiler-derived diagnostics to the Problems panel.
+- Adds clickable source locations in reports.
 - Adds simple Rust hover hints for `&`, `&mut`, `for ... in`, `.clone()`, and `tokio::spawn(async { ... })`.
+- Offers high-confidence Quick Fixes from rustc suggestions and iterator borrow rewrites.
+- Can run on save with debouncing and single-flight process control.
+- Can fall back to `rustc` for standalone `.rs` files without `Cargo.toml`.
+- Can run `cargo clippy`, `cargo tree`, `cargo expand`, and `rustc --explain` helper flows.
 - Can explain a selected Rust snippet with heuristic rules.
 
 ## Supported errors in this prototype
 
+- `E0106`: missing lifetime specifier
+- `E0277`: trait bound not satisfied
+- `E0373`: closure or async block may outlive borrowed data
 - `E0382`: use of moved value, including `for item in collection` iterator moves
 - `E0499`: cannot borrow as mutable more than once
 - `E0502`: mutable borrow conflicts with immutable borrow
@@ -22,6 +33,12 @@ It is designed as a developer tool for people who are new to Rust but still need
 - `E0515`: cannot return reference to local variable
 - `E0597`: borrowed value does not live long enough
 - `E0716`: temporary value dropped while borrowed
+- Clippy clone/to-owned lints such as `clippy::redundant_clone`
+
+## Design docs
+
+- [Design](docs/DESIGN.md)
+- [Tool comparison](docs/COMPARISON.md)
 
 ## Compatibility
 
@@ -40,6 +57,21 @@ code --install-extension rust-ownership-lens-0.1.0.vsix
 ```
 
 Then restart VS Code.
+
+## Build a VSIX
+
+Preferred path:
+
+```bash
+npm install
+npm run package
+```
+
+Offline fallback that uses `zip` instead of `vsce`:
+
+```bash
+npm run package:offline
+```
 
 ## Install from zip folder
 
@@ -70,6 +102,8 @@ Rust Ownership Lens: Run cargo check
 - `Rust Ownership Lens: Show Panel`
 - `Rust Ownership Lens: Copy Last Explanation`
 - `Rust Ownership Lens: Insert Example Error`
+- `Rust Ownership Lens: Explain Dependency`
+- `Rust Ownership Lens: Expand Macro at Cursor`
 
 ## Example output
 
@@ -98,15 +132,30 @@ Best fixes:
 
 ## Settings
 
-```json
-{
-  "rustOwnershipLens.cargoCommand": "cargo",
-  "rustOwnershipLens.cargoArgs": ["check", "--message-format=json"],
-  "rustOwnershipLens.showHoverHints": true,
-  "rustOwnershipLens.includeWarnings": false,
-  "rustOwnershipLens.maxDiagnostics": 20
-}
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `rustOwnershipLens.cargoCommand` | `cargo` | Cargo executable path. |
+| `rustOwnershipLens.cargoArgs` | `["check", "--message-format=json"]` | Arguments for Cargo. Keep JSON output enabled. |
+| `rustOwnershipLens.useClippy` | `false` | Run `cargo clippy --message-format=json` by default. |
+| `rustOwnershipLens.includeWarnings` | `false` | Include warning diagnostics in the report. |
+| `rustOwnershipLens.maxDiagnostics` | `20` | Maximum diagnostics shown after de-duplication. |
+| `rustOwnershipLens.showHoverHints` | `true` | Enable lightweight hover hints. |
+| `rustOwnershipLens.hoverOnlyOnDiagnostics` | `true` | Show hovers only on current diagnostic lines. |
+| `rustOwnershipLens.showInlineTimeline` | `true` | Show inline event markers for borrow/move/use/drop spans. |
+| `rustOwnershipLens.runOnSave` | `false` | Re-run diagnostics when a Rust file is saved. |
+| `rustOwnershipLens.timeoutSeconds` | `300` | Stop long-running cargo/rustc checks after this many seconds. |
+| `rustOwnershipLens.singleFileEdition` | `2024` | Edition used for standalone `.rs` fallback checks. |
+
+## Visual preview
+
+```text
+users:  ---- immutable borrow ----+
+users:        mutable borrow X    |
+                                |
+The read borrow and write borrow overlap.
 ```
+
+The Webview report uses this same ASCII timeline and turns `src/main.rs:4:5` locations into clickable source links.
 
 ## Current limitations
 
@@ -115,7 +164,7 @@ This is an MVP prototype.
 - It does not replace rust-analyzer.
 - It depends on `cargo check` output.
 - The ASCII timeline uses rustc spans when available, so quality depends on the compiler diagnostic.
-- Auto-fix is not implemented yet.
+- Auto-fix is intentionally limited to rustc suggestions and small high-confidence rewrites.
 - The selection explainer is heuristic and should not be treated as compiler truth.
 
 ## Next features

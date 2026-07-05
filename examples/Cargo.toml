@@ -12,8 +12,32 @@ name = "e0382"
 path = "e0382.rs"
 
 [[bin]]
+name = "e0373"
+path = "e0373.rs"
+
+[[bin]]
+name = "e0277"
+path = "e0277.rs"
+
+[[bin]]
 name = "e0515"
 path = "e0515.rs"
+
+[[bin]]
+name = "e0499"
+path = "e0499.rs"
+
+[[bin]]
+name = "e0505"
+path = "e0505.rs"
+
+[[bin]]
+name = "e0597"
+path = "e0597.rs"
+
+[[bin]]
+name = "e0716"
+path = "e0716.rs"
 
 [[bin]]
 name = "iterator-move"

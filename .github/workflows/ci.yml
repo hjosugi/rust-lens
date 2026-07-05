@@ -63,3 +63,22 @@ jobs:
         run: npm run test:rust-compat
         env:
           RUST_LENS_SKIP_RUSTUP_OVERRIDE: "1"
+
+  package:
+    name: VSIX package artifact
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install packaging dependencies
+        run: npm install
+      - name: Build VSIX
+        run: npm run package
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ownership-lens-vsix
+          path: rust-ownership-lens-*.vsix

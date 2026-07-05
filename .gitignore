@@ -1,2 +1,5 @@
 examples/Cargo.lock
 examples/target/
+node_modules/
+*.vsix
+npm-debug.log*

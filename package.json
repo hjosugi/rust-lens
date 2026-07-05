@@ -3,8 +3,17 @@
   "displayName": "Rust Ownership Lens",
   "description": "Explain Rust ownership, borrowing, lifetime, iterator, and async errors with ASCII timelines.",
   "version": "0.1.0",
-  "publisher": "local-rust-tools",
+  "publisher": "hjosugi",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hjosugi/rust-lens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hjosugi/rust-lens/issues"
+  },
+  "homepage": "https://github.com/hjosugi/rust-lens#readme",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -24,7 +33,10 @@
   "main": "./extension.js",
   "scripts": {
     "test": "node --test",
-    "test:rust-compat": "node scripts/check-rust-compat.js"
+    "test:rust-compat": "node scripts/check-rust-compat.js",
+    "package": "vsce package --out rust-ownership-lens-${npm_package_version}.vsix",
+    "package:offline": "bash scripts/package-vsix.sh",
+    "install-local": "bash scripts/install-local.sh"
   },
   "activationEvents": [
     "onLanguage:rust",
@@ -54,6 +66,14 @@
       {
         "command": "rustOwnershipLens.insertExample",
         "title": "Rust Ownership Lens: Insert Example Error"
+      },
+      {
+        "command": "rustOwnershipLens.explainDependency",
+        "title": "Rust Ownership Lens: Explain Dependency"
+      },
+      {
+        "command": "rustOwnershipLens.expandMacro",
+        "title": "Rust Ownership Lens: Expand Macro at Cursor"
       }
     ],
     "viewsContainers": {
@@ -102,6 +122,12 @@
         },
         {
           "command": "rustOwnershipLens.insertExample"
+        },
+        {
+          "command": "rustOwnershipLens.explainDependency"
+        },
+        {
+          "command": "rustOwnershipLens.expandMacro"
         }
       ]
     },
@@ -142,6 +168,44 @@
           "type": "boolean",
           "default": false,
           "description": "Also include Rust warnings from cargo check output."
+        },
+        "rustOwnershipLens.runOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run Rust Ownership Lens automatically when a Rust file is saved."
+        },
+        "rustOwnershipLens.showInlineTimeline": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show lightweight ownership timeline markers at the end of related diagnostic lines."
+        },
+        "rustOwnershipLens.hoverOnlyOnDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only show Rust Ownership Lens hover hints on lines that currently have Rust Ownership Lens diagnostics."
+        },
+        "rustOwnershipLens.useClippy": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run cargo clippy --message-format=json instead of cargo check."
+        },
+        "rustOwnershipLens.timeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "Maximum seconds to wait for cargo or rustc before timing out."
+        },
+        "rustOwnershipLens.singleFileEdition": {
+          "type": "string",
+          "default": "2024",
+          "enum": [
+            "2015",
+            "2018",
+            "2021",
+            "2024"
+          ],
+          "description": "Rust edition used when checking a standalone .rs file without Cargo.toml."
         }
       }
     }
@@ -155,5 +219,8 @@
         "rustOwnershipLens.cargoArgs"
       ]
     }
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.2"
   }
 }

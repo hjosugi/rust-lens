@@ -1,6 +1,14 @@
+.git/**
+.github/**
+.gitignore
 .vscode/**
 .vscode-test/**
+examples/**
+fixtures/**
 node_modules/**
-.git/**
+scripts/**
+test/**
 *.vsix
 *.zip
+npm-debug.log*
+package-lock.json

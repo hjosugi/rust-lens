@@ -8,9 +8,14 @@ const os = require('os');
 
 const DEFAULT_CARGO_COMMAND = 'cargo';
 const DEFAULT_CARGO_ARGS = ['check', '--message-format=json'];
+const DEFAULT_CLIPPY_ARGS = ['clippy', '--message-format=json'];
+const DEFAULT_RUSTC_COMMAND = 'rustc';
+const RUN_ON_SAVE_DEBOUNCE_MS = 500;
 
 const KNOWN_CODES = new Set([
   'E0106', // missing lifetime specifier
+  'E0277', // trait bound not satisfied
+  'E0373', // closure may outlive borrowed value
   'E0382', // use of moved value
   'E0499', // mutable borrow more than once
   'E0502', // mutable + immutable borrow overlap
@@ -110,6 +115,13 @@ let lastReportText = '';
 let lastReportHtml = '';
 let lastDiagnostics = [];
 let viewProvider;
+let diagnosticCollection;
+let timelineDecorationTypes = {};
+let saveDebounceTimer;
+let cargoRunInFlight = false;
+let cargoRunQueued = false;
+let lastRunCwd = '';
+let currentRunProcess;
 
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Rust Ownership Lens');
@@ -120,8 +132,12 @@ function activate(context) {
   statusBarItem.show();
 
   viewProvider = new RustLensViewProvider(context.extensionUri);
+  if (vscode.languages && typeof vscode.languages.createDiagnosticCollection === 'function') {
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('rustOwnershipLens');
+  }
+  timelineDecorationTypes = createTimelineDecorationTypes();
 
-  context.subscriptions.push(
+  const subscriptions = [
     outputChannel,
     statusBarItem,
     vscode.window.registerWebviewViewProvider('rustOwnershipLens.view', viewProvider),
@@ -136,66 +152,118 @@ function activate(context) {
       await vscode.env.clipboard.writeText(text);
       vscode.window.showInformationMessage('Rust Ownership Lens explanation copied.');
     }),
-    vscode.commands.registerCommand('rustOwnershipLens.insertExample', () => insertExampleError())
-  );
+    vscode.commands.registerCommand('rustOwnershipLens.insertExample', () => insertExampleError()),
+    vscode.commands.registerCommand('rustOwnershipLens.explainDependency', () => explainDependency()),
+    vscode.commands.registerCommand('rustOwnershipLens.expandMacro', () => expandMacroAtCursor()),
+    vscode.workspace.onDidSaveTextDocument((document) => onTextDocumentSaved(document))
+  ];
+
+  if (diagnosticCollection) subscriptions.push(diagnosticCollection);
+  for (const decorationType of Object.values(timelineDecorationTypes)) {
+    if (decorationType) subscriptions.push(decorationType);
+  }
+  if (vscode.window && typeof vscode.window.onDidChangeVisibleTextEditors === 'function') {
+    subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(() => updateInlineTimelineDecorations(lastDiagnostics, lastRunCwd)));
+  }
+
+  context.subscriptions.push(...subscriptions);
 
   registerHoverProvider(context);
   registerCodeActionProvider(context);
   viewProvider.update(welcomeHtml(), welcomeText());
 }
 
-function deactivate() {}
+function deactivate() {
+  if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+}
 
 async function runCargoCheck() {
-  const folder = getWorkspaceFolder();
-  if (!folder) {
-    vscode.window.showWarningMessage('Open a Rust workspace folder first.');
+  if (cargoRunInFlight) {
+    cargoRunQueued = true;
+    cancelCurrentRunProcess();
     return;
   }
 
   const config = vscode.workspace.getConfiguration('rustOwnershipLens');
-  const cargoConfig = getCargoRunConfig(config, vscode.workspace.isTrusted !== false);
-  const cargoCommand = cargoConfig.cargoCommand;
-  const cargoArgs = cargoConfig.cargoArgs;
   const includeWarnings = config.get('includeWarnings', false);
   const maxDiagnostics = config.get('maxDiagnostics', 20);
-
-  statusBarItem.text = '$(sync~spin) Rust Lens';
-  outputChannel.clear();
-  outputChannel.appendLine(`Running: ${cargoCommand} ${cargoArgs.join(' ')}`);
-  outputChannel.appendLine(`Workspace: ${folder.uri.fsPath}`);
-  if (cargoConfig.usedTrustedFallback) {
-    outputChannel.appendLine('Workspace Trust: ignored workspace cargoCommand/cargoArgs overrides in this untrusted workspace.');
+  const timeoutSeconds = config.get('timeoutSeconds', 300);
+  const target = getRunTarget(config);
+  if (!target) {
+    vscode.window.showWarningMessage('Open a Rust workspace folder or a Rust source file first.');
+    return;
   }
-  if (!hasJsonMessageFormat(cargoArgs)) {
-    const warning = 'Rust Ownership Lens: rustOwnershipLens.cargoArgs is missing --message-format=json, so cargo diagnostics may not parse.';
-    outputChannel.appendLine(`Warning: ${warning}`);
-    vscode.window.showWarningMessage(warning);
-  }
-  outputChannel.show(true);
-  viewProvider.update(loadingHtml(folder.uri.fsPath, cargoCommand, cargoArgs), 'Running cargo check...');
 
+  cargoRunInFlight = true;
+  lastRunCwd = target.cwd;
   try {
-    const result = await runProcess(cargoCommand, cargoArgs, folder.uri.fsPath);
-    outputChannel.appendLine('--- cargo stdout ---');
+    statusBarItem.text = '$(sync~spin) Rust Lens';
+    outputChannel.clear();
+    outputChannel.appendLine(`Running: ${target.command} ${target.args.join(' ')}`);
+    outputChannel.appendLine(`Workspace: ${target.cwd}`);
+    if (target.description) outputChannel.appendLine(`Mode: ${target.description}`);
+    if (target.usedTrustedFallback) {
+      outputChannel.appendLine('Workspace Trust: ignored workspace cargoCommand/cargoArgs overrides in this untrusted workspace.');
+    }
+    if (target.requiresJsonWarning) {
+      const warning = 'Rust Ownership Lens: rustOwnershipLens.cargoArgs is missing --message-format=json, so cargo diagnostics may not parse.';
+      outputChannel.appendLine(`Warning: ${warning}`);
+      vscode.window.showWarningMessage(warning);
+    }
+    outputChannel.show(true);
+    viewProvider.update(loadingHtml(target.cwd, target.command, target.args, target.description), 'Running Rust diagnostics...');
+
+    let previewShown = false;
+    let streamedRaw = '';
+    const result = await runWithProgress(`Rust Ownership Lens: ${target.label}`, async (progress, token) => {
+      return runProcess(target.command, target.args, target.cwd, {
+        timeoutMs: timeoutSeconds * 1000,
+        token,
+        onData(chunk) {
+          streamedRaw += chunk;
+          if (previewShown) return;
+          const messages = parseCargoJsonMessages(streamedRaw);
+          const preview = prioritizeDiagnostics(deduplicateDiagnostics(extractDiagnostics(messages, includeWarnings)), maxDiagnostics);
+          const firstKnown = preview.filter(isKnownDiagnostic);
+          if (firstKnown.length > 0) {
+            previewShown = true;
+            progress.report({ message: `parsed ${firstKnown.length} known diagnostic(s)` });
+            const partial = buildReport(firstKnown, {
+              cwd: target.cwd,
+              exitCode: 'running',
+              command: `${target.command} ${target.args.join(' ')}`,
+              rawMessageCount: messages.length,
+              includeWarnings,
+              mode: target.description
+            });
+            viewProvider.update(partial.html, partial.text);
+          }
+        }
+      });
+    });
+
+    outputChannel.appendLine(`--- ${target.label} stdout ---`);
     outputChannel.appendLine(result.stdout || '(empty)');
     if (result.stderr) {
-      outputChannel.appendLine('--- cargo stderr ---');
+      outputChannel.appendLine(`--- ${target.label} stderr ---`);
       outputChannel.appendLine(result.stderr);
     }
 
     const messages = parseCargoJsonMessages(result.stdout + os.EOL + result.stderr);
-    const diagnostics = extractDiagnostics(messages, includeWarnings)
-      .filter((diagnostic) => includeWarnings || diagnostic.level === 'error')
-      .slice(0, maxDiagnostics);
+    const diagnostics = prioritizeDiagnostics(
+      deduplicateDiagnostics(extractDiagnostics(messages, includeWarnings)
+        .filter((diagnostic) => includeWarnings || diagnostic.level === 'error')),
+      maxDiagnostics
+    );
 
     lastDiagnostics = diagnostics;
     const report = buildReport(diagnostics, {
-      cwd: folder.uri.fsPath,
+      cwd: target.cwd,
       exitCode: result.exitCode,
-      command: `${cargoCommand} ${cargoArgs.join(' ')}`,
+      command: `${target.command} ${target.args.join(' ')}`,
       rawMessageCount: messages.length,
       includeWarnings,
+      mode: target.description
     });
 
     lastReportText = report.text;
@@ -203,11 +271,13 @@ async function runCargoCheck() {
     outputChannel.appendLine('--- Rust Ownership Lens report ---');
     outputChannel.appendLine(report.text);
     viewProvider.update(report.html, report.text);
+    publishDiagnostics(diagnostics, target.cwd);
+    updateInlineTimelineDecorations(diagnostics, target.cwd);
     statusBarItem.text = diagnostics.length > 0 ? `$(warning) Rust Lens ${diagnostics.length}` : '$(check) Rust Lens';
 
-    const knownCount = diagnostics.filter((d) => KNOWN_CODES.has(getCode(d))).length;
+    const knownCount = diagnostics.filter(isKnownDiagnostic).length;
     if (diagnostics.length === 0) {
-      vscode.window.showInformationMessage('Rust Ownership Lens: cargo check produced no parsed diagnostics.');
+      vscode.window.showInformationMessage(`Rust Ownership Lens: ${target.label} produced no parsed diagnostics.`);
     } else if (knownCount === 0) {
       vscode.window.showInformationMessage(`Rust Ownership Lens: ${diagnostics.length} diagnostics found. No known ownership error code matched yet.`);
     } else {
@@ -228,6 +298,13 @@ async function runCargoCheck() {
     viewProvider.update(lastReportHtml, lastReportText);
     statusBarItem.text = '$(error) Rust Lens';
     vscode.window.showErrorMessage(`Rust Ownership Lens failed: ${message}`);
+  } finally {
+    cargoRunInFlight = false;
+    if (target && target.cleanup) target.cleanup();
+    if (cargoRunQueued) {
+      cargoRunQueued = false;
+      setTimeout(() => runCargoCheck(), 0);
+    }
   }
 }
 
@@ -243,7 +320,84 @@ function getWorkspaceFolder() {
   return undefined;
 }
 
-function runProcess(command, args, cwd) {
+function getRunTarget(config) {
+  const folder = getWorkspaceFolder();
+  const editor = vscode.window.activeTextEditor;
+  const activeRustFile = editor && editor.document && editor.document.languageId === 'rust'
+    ? editor.document.uri.fsPath
+    : '';
+  const workspacePath = folder && folder.uri ? folder.uri.fsPath : '';
+  const cargoRoot = findCargoRoot(activeRustFile ? path.dirname(activeRustFile) : workspacePath, workspacePath);
+
+  if (cargoRoot) {
+    const cargoConfig = getCargoRunConfig(config, vscode.workspace.isTrusted !== false);
+    return {
+      label: cargoConfig.cargoArgs[0] === 'clippy' ? 'cargo clippy' : 'cargo check',
+      command: cargoConfig.cargoCommand,
+      args: cargoConfig.cargoArgs,
+      cwd: cargoRoot,
+      usedTrustedFallback: cargoConfig.usedTrustedFallback,
+      requiresJsonWarning: !hasJsonMessageFormat(cargoConfig.cargoArgs),
+      description: cargoConfig.cargoArgs[0] === 'clippy' ? 'cargo clippy mode' : 'cargo workspace mode'
+    };
+  }
+
+  if (activeRustFile) {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rust-lens-'));
+    const edition = normalizeRustEdition(config.get('singleFileEdition', '2024'));
+    return {
+      label: 'rustc single-file check',
+      command: DEFAULT_RUSTC_COMMAND,
+      args: [
+        '--edition',
+        edition,
+        '--error-format=json',
+        '--emit=metadata',
+        '-o',
+        path.join(tempDir, 'output.rmeta'),
+        activeRustFile
+      ],
+      cwd: path.dirname(activeRustFile),
+      description: `single-file mode (edition ${edition})`,
+      cleanup() {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  return undefined;
+}
+
+function findCargoRoot(startDir, workspacePath) {
+  if (!startDir) return '';
+  let current = startDir;
+  const stop = workspacePath ? path.resolve(workspacePath) : path.parse(current).root;
+  while (current && current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, 'Cargo.toml'))) return current;
+    if (path.resolve(current) === stop) break;
+    current = path.dirname(current);
+  }
+  if (workspacePath && fs.existsSync(path.join(workspacePath, 'Cargo.toml'))) return workspacePath;
+  return '';
+}
+
+function normalizeRustEdition(value) {
+  const edition = String(value || '').trim();
+  return ['2015', '2018', '2021', '2024'].includes(edition) ? edition : '2024';
+}
+
+function runWithProgress(title, task) {
+  if (vscode.window && typeof vscode.window.withProgress === 'function' && vscode.ProgressLocation) {
+    return vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title,
+      cancellable: true
+    }, task);
+  }
+  return task({ report() {} }, undefined);
+}
+
+function runProcess(command, args, cwd, options = {}) {
   return new Promise((resolve, reject) => {
     const spawnCommand = resolveCommandForSpawn(command);
     const child = cp.spawn(spawnCommand, args, {
@@ -252,19 +406,61 @@ function runProcess(command, args, cwd) {
       env: Object.assign({}, process.env, { CARGO_TERM_COLOR: 'never' })
     });
 
+    currentRunProcess = child;
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timeout;
 
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', reject);
-    child.on('close', (exitCode) => resolve({ stdout, stderr, exitCode }));
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (currentRunProcess === child) currentRunProcess = undefined;
+      fn(value);
+    };
+
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        child.kill('SIGTERM');
+        settle(reject, new Error(`Timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
+      }, options.timeoutMs);
+    }
+
+    if (options.token && typeof options.token.onCancellationRequested === 'function') {
+      options.token.onCancellationRequested(() => {
+        child.kill('SIGTERM');
+        settle(reject, new Error('Canceled by user.'));
+      });
+    }
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (typeof options.onData === 'function') options.onData(text, 'stdout');
+    });
+    child.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (typeof options.onData === 'function') options.onData(text, 'stderr');
+    });
+    child.on('error', (err) => settle(reject, err));
+    child.on('close', (exitCode) => settle(resolve, { stdout, stderr, exitCode }));
   });
+}
+
+function cancelCurrentRunProcess() {
+  if (currentRunProcess && !currentRunProcess.killed) {
+    currentRunProcess.kill('SIGTERM');
+  }
 }
 
 function getCargoRunConfig(config, workspaceTrusted) {
   const commandResult = getRestrictedConfigurationValue(config, 'cargoCommand', DEFAULT_CARGO_COMMAND, workspaceTrusted);
-  const argsResult = getRestrictedConfigurationValue(config, 'cargoArgs', DEFAULT_CARGO_ARGS, workspaceTrusted);
+  const defaultArgs = config && typeof config.get === 'function' && config.get('useClippy', false)
+    ? DEFAULT_CLIPPY_ARGS
+    : DEFAULT_CARGO_ARGS;
+  const argsResult = getRestrictedConfigurationValue(config, 'cargoArgs', defaultArgs, workspaceTrusted);
 
   return {
     cargoCommand: normalizeCargoCommand(commandResult.value),
@@ -388,9 +584,40 @@ function extractDiagnostics(messages, includeWarnings) {
   return diagnostics;
 }
 
+function deduplicateDiagnostics(diagnostics) {
+  const unique = [];
+  const seen = new Set();
+  for (const diagnostic of Array.isArray(diagnostics) ? diagnostics : []) {
+    const primary = getPrimarySpan(diagnostic);
+    const key = [
+      getCode(diagnostic),
+      formatDiagnosticPath(primary && primary.file_name ? primary.file_name : ''),
+      primary && primary.line_start ? primary.line_start : '',
+      primary && primary.column_start ? primary.column_start : '',
+      diagnostic && diagnostic.message ? diagnostic.message : ''
+    ].join('\u0000');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(diagnostic);
+  }
+  return unique;
+}
+
+function prioritizeDiagnostics(diagnostics, maxDiagnostics) {
+  const unique = deduplicateDiagnostics(diagnostics);
+  const known = unique.filter(isKnownDiagnostic);
+  const unknown = unique.filter((diagnostic) => !isKnownDiagnostic(diagnostic));
+  return known.concat(unknown).slice(0, maxDiagnostics);
+}
+
+function isKnownDiagnostic(diagnostic) {
+  const code = getCode(diagnostic);
+  return KNOWN_CODES.has(code) || isClippyCloneDiagnostic(diagnostic);
+}
+
 function buildReport(diagnostics, meta) {
-  const known = diagnostics.filter((d) => KNOWN_CODES.has(getCode(d)));
-  const unknown = diagnostics.filter((d) => !KNOWN_CODES.has(getCode(d)));
+  const known = diagnostics.filter(isKnownDiagnostic);
+  const unknown = diagnostics.filter((d) => !isKnownDiagnostic(d));
 
   const parts = [];
   parts.push('Rust Ownership Lens');
@@ -398,6 +625,7 @@ function buildReport(diagnostics, meta) {
   parts.push('');
   parts.push(`Command: ${meta.command}`);
   parts.push(`Workspace: ${meta.cwd}`);
+  if (meta.mode) parts.push(`Mode: ${meta.mode}`);
   parts.push(`cargo exit code: ${meta.exitCode}`);
   parts.push(`parsed JSON messages: ${meta.rawMessageCount}`);
   parts.push(`diagnostics shown: ${diagnostics.length}`);
@@ -431,7 +659,7 @@ function buildReport(diagnostics, meta) {
   const text = parts.join('\n').trimEnd();
   return {
     text,
-    html: textReportHtml('Rust Ownership Lens', text)
+    html: textReportHtml('Rust Ownership Lens', text, { cwd: meta.cwd })
   };
 }
 
@@ -449,6 +677,9 @@ function renderDiagnosticExplanation(diagnostic, index) {
   lines.push('-'.repeat(Math.max(18, `Issue ${index}: error[${code}]`.length)));
   lines.push(`File: ${file}`);
   lines.push(`Message: ${message}`);
+  if (/^E\d{4}$/.test(code)) {
+    lines.push(`Official explanation: rustc --explain ${code} | https://doc.rust-lang.org/error_codes/${code}.html`);
+  }
   if (variable) lines.push(`Main value: ${variable}`);
   lines.push('');
 
@@ -478,6 +709,48 @@ function templateForDiagnostic(code, variable, diagnostic, events) {
   const timeline = renderEventTimeline(events, v);
 
   switch (code) {
+    case 'E0277':
+      return [
+        'Problem:',
+        `  A trait bound is missing: Rust needed ${v} to implement a trait, but that requirement was not satisfied.`,
+        '',
+        'Trait bound ASCII:',
+        '```text',
+        'generic code asks for: T: Trait',
+        'actual type supplied:  T',
+        '                         ^ Trait implementation or bound missing X',
+        '```',
+        '',
+        timeline,
+        '',
+        'Best fixes:',
+        '  A. Add the trait bound where the generic type is declared, for example `T: Clone` or `T: Debug`.',
+        '  B. Pass a reference such as `&T` when the callee only needs borrowed access.',
+        '  C. Derive or implement the missing trait when the type should support it.',
+        '  D. For `Send` or `\'static`, move owned data into the task or use `Arc<T>` for shared state.'
+      ].join('\n');
+
+    case 'E0373':
+      return [
+        'Problem:',
+        '  A closure or async block may outlive the current function while borrowing local data.',
+        '',
+        'Async lifetime ASCII:',
+        '```text',
+        'current function frame: [local data] ---- drops here',
+        'closure/task:                    may run later ---->',
+        'borrowed local data crosses that boundary X',
+        '```',
+        '',
+        timeline,
+        '',
+        'Best fixes:',
+        '  A. Use `move` or `async move` so the closure/task owns the data it needs.',
+        '  B. Clone small owned values before spawning if each task needs its own copy.',
+        '  C. Use `Arc<T>` for shared read-only data across tasks.',
+        '  D. Use `Arc<Mutex<T>>` or another synchronization primitive only for true shared mutation.'
+      ].join('\n');
+
     case 'E0106':
       return [
         'Problem:',
@@ -663,6 +936,9 @@ function templateForDiagnostic(code, variable, diagnostic, events) {
       ].join('\n');
 
     default:
+      if (isClippyCloneDiagnostic(diagnostic)) {
+        return clippyCloneTemplate(diagnostic, timeline);
+      }
       return [
         'Problem:',
         `  ${diagnostic.message || 'Unknown Rust diagnostic'}`,
@@ -784,7 +1060,7 @@ function renderEventTimeline(events, variable) {
     const pos = events.length === 1 ? 0 : Math.floor((i / (events.length - 1)) * (width - 1));
     const markerLine = ' '.repeat(pos) + markerForKind(event.kind);
     const pathLine = '-'.repeat(Math.max(0, pos)) + markerForKind(event.kind) + '-'.repeat(Math.max(0, width - pos - 1));
-    rows.push(`line ${String(event.line).padStart(4, ' ')}: ${event.kind}`);
+    rows.push(`${formatDiagnosticPath(event.file)}:${event.line}:${event.column} line ${String(event.line).padStart(4, ' ')}: ${event.kind}`);
     rows.push(`          ${event.label}`);
     rows.push(`          ${pathLine}`);
     rows.push(`          ${markerLine}`);
@@ -850,6 +1126,79 @@ function collectSuggestions(diagnostic, code, variable) {
   }
 
   return suggestions.slice(0, 8);
+}
+
+function isClippyCloneDiagnostic(diagnostic) {
+  const code = getCode(diagnostic);
+  const text = diagnosticSearchText(diagnostic).toLowerCase();
+  return code.startsWith('clippy::') && (
+    code.includes('clone') ||
+    code.includes('to_owned') ||
+    text.includes('clone') ||
+    text.includes('to_owned')
+  );
+}
+
+function clippyCloneTemplate(diagnostic, timeline) {
+  const code = getCode(diagnostic) || 'clippy';
+  return [
+    'Problem:',
+    `  Clippy reported ${code}, usually meaning an owned copy is being made where a borrow or move would be clearer.`,
+    '',
+    'Clone cost ASCII:',
+    '```text',
+    'value ---- clone() ----> new allocation/copy',
+    'borrow with &value ---> no ownership transfer',
+    '```',
+    '',
+    timeline,
+    '',
+    'Best fixes:',
+    '  A. Remove the clone when the original value can be moved.',
+    '  B. Borrow with `&value` when the callee only reads.',
+    '  C. Keep the clone only when two independent owners are really needed.',
+    '  D. Apply only MachineApplicable Clippy suggestions automatically.'
+  ].join('\n');
+}
+
+function collectSuggestedReplacementEdits(diagnostic, fileName, lineNumber) {
+  const edits = [];
+  const targetFile = path.resolve(fileName);
+  const clippyDiagnostic = isClippyCloneDiagnostic(diagnostic);
+  for (const candidate of diagnosticSuggestionSpans(diagnostic)) {
+    const span = candidate.span;
+    if (!span || !span.suggested_replacement) continue;
+    if (span.file_name && resolveDiagnosticFile(span.file_name, lastRunCwd) !== targetFile) continue;
+    if ((span.line_start || 1) - 1 !== lineNumber) continue;
+    if (clippyDiagnostic && !isMachineApplicableSuggestion(span, candidate.child)) continue;
+    edits.push({
+      title: `Rust Ownership Lens: apply ${getCode(diagnostic) || 'rustc'} suggestion`,
+      replacement: span.suggested_replacement,
+      line: (span.line_start || 1) - 1,
+      start: Math.max(0, (span.column_start || 1) - 1),
+      end: Math.max(0, (span.column_end || span.column_start || 1) - 1)
+    });
+  }
+  return edits;
+}
+
+function diagnosticSuggestionSpans(diagnostic) {
+  const values = [];
+  for (const span of Array.isArray(diagnostic && diagnostic.spans) ? diagnostic.spans : []) {
+    values.push({ span, child: undefined });
+  }
+  const children = Array.isArray(diagnostic && diagnostic.children) ? diagnostic.children : [];
+  for (const child of children) {
+    for (const span of Array.isArray(child.spans) ? child.spans : []) {
+      values.push({ span, child });
+    }
+  }
+  return values;
+}
+
+function isMachineApplicableSuggestion(span, child) {
+  const value = span.suggestion_applicability || span.applicability || (child && child.applicability);
+  return !value || value === 'MachineApplicable';
 }
 
 function isForLoopIteratorMoveDiagnostic(diagnostic) {
@@ -940,6 +1289,118 @@ function formatSpanLocation(span) {
   const line = span.line_start || '?';
   const column = span.column_start || '?';
   return `${file}:${line}:${column}`;
+}
+
+function publishDiagnostics(diagnostics, cwd) {
+  if (!diagnosticCollection || !vscode.Diagnostic || !vscode.Range || !vscode.Uri) return;
+  diagnosticCollection.clear();
+  const byFile = new Map();
+  for (const diagnostic of diagnostics) {
+    const primary = getPrimarySpan(diagnostic);
+    if (!primary || !primary.file_name) continue;
+    const filePath = resolveDiagnosticFile(primary.file_name, cwd);
+    const range = rangeFromSpan(primary);
+    const item = new vscode.Diagnostic(
+      range,
+      `${diagnosticSummary(diagnostic)} See Rust Ownership Lens for the full timeline.`,
+      severityForDiagnostic(diagnostic)
+    );
+    item.source = 'Rust Ownership Lens';
+    item.code = getCode(diagnostic) || undefined;
+    if (!byFile.has(filePath)) byFile.set(filePath, []);
+    byFile.get(filePath).push(item);
+  }
+  for (const [filePath, items] of byFile) {
+    diagnosticCollection.set(vscode.Uri.file(filePath), items);
+  }
+}
+
+function diagnosticSummary(diagnostic) {
+  const code = getCode(diagnostic);
+  const variable = guessVariable(diagnostic);
+  if (code === 'E0382') return variable ? `${variable} was moved and then used again.` : 'A value was moved and then used again.';
+  if (code === 'E0499') return variable ? `${variable} has overlapping mutable borrows.` : 'Overlapping mutable borrows.';
+  if (code === 'E0502') return variable ? `${variable} has conflicting immutable and mutable borrows.` : 'Conflicting immutable and mutable borrows.';
+  if (code === 'E0505') return variable ? `${variable} is moved while still borrowed.` : 'A value is moved while still borrowed.';
+  if (code === 'E0515') return 'A reference to local data escapes the function.';
+  if (code === 'E0597') return variable ? `${variable} does not live long enough.` : 'A borrowed value does not live long enough.';
+  if (code === 'E0716') return 'A borrowed temporary is dropped too soon.';
+  if (code === 'E0277') return 'A required trait bound is missing.';
+  if (code === 'E0373') return 'A closure or async block may outlive borrowed data.';
+  if (isClippyCloneDiagnostic(diagnostic)) return 'Clippy found a clone or ownership conversion that may be unnecessary.';
+  return diagnostic.message || 'Rust diagnostic.';
+}
+
+function severityForDiagnostic(diagnostic) {
+  if (!vscode.DiagnosticSeverity) return undefined;
+  if (diagnostic.level === 'warning') return vscode.DiagnosticSeverity.Warning;
+  if (diagnostic.level === 'note') return vscode.DiagnosticSeverity.Information;
+  return vscode.DiagnosticSeverity.Error;
+}
+
+function rangeFromSpan(span) {
+  const startLine = Math.max(0, (span.line_start || 1) - 1);
+  const startColumn = Math.max(0, (span.column_start || 1) - 1);
+  const endLine = Math.max(startLine, (span.line_end || span.line_start || 1) - 1);
+  const endColumn = Math.max(startColumn + 1, (span.column_end || span.column_start || 2) - 1);
+  return new vscode.Range(startLine, startColumn, endLine, endColumn);
+}
+
+function resolveDiagnosticFile(fileName, cwd) {
+  const cleaned = formatDiagnosticPath(fileName);
+  if (path.isAbsolute(cleaned)) return path.normalize(cleaned);
+  return path.resolve(cwd || lastRunCwd || process.cwd(), cleaned);
+}
+
+function createTimelineDecorationTypes() {
+  if (!vscode.window || typeof vscode.window.createTextEditorDecorationType !== 'function') return {};
+  const make = (text, color) => vscode.window.createTextEditorDecorationType({
+    after: {
+      contentText: ` ${text}`,
+      color: new vscode.ThemeColor(color),
+      margin: '0 0 0 1.5em'
+    },
+    rangeBehavior: vscode.DecorationRangeBehavior && vscode.DecorationRangeBehavior.ClosedOpen
+  });
+  return {
+    borrow: make('Rust Lens: borrow', 'charts.blue'),
+    move: make('Rust Lens: move', 'charts.orange'),
+    drop: make('Rust Lens: drop', 'charts.purple'),
+    use: make('Rust Lens: use', 'charts.green'),
+    return: make('Rust Lens: return', 'charts.yellow'),
+    'primary error': make('Rust Lens: conflict', 'errorForeground'),
+    related: make('Rust Lens: related', 'descriptionForeground')
+  };
+}
+
+function updateInlineTimelineDecorations(diagnostics, cwd) {
+  if (!vscode.window || !Array.isArray(vscode.window.visibleTextEditors)) return;
+  const config = vscode.workspace.getConfiguration('rustOwnershipLens');
+  const enabled = config.get('showInlineTimeline', true);
+  for (const editor of vscode.window.visibleTextEditors) {
+    for (const decorationType of Object.values(timelineDecorationTypes)) {
+      if (decorationType && editor.setDecorations) editor.setDecorations(decorationType, []);
+    }
+    if (!enabled || !editor.document || !editor.document.uri) continue;
+    const byKind = {};
+    for (const diagnostic of diagnostics || []) {
+      for (const event of buildEvents(diagnostic)) {
+        if (!event.file) continue;
+        if (resolveDiagnosticFile(event.file, cwd) !== path.normalize(editor.document.uri.fsPath)) continue;
+        const kind = timelineDecorationTypes[event.kind] ? event.kind : 'related';
+        if (!byKind[kind]) byKind[kind] = [];
+        const line = Math.max(0, (event.line || 1) - 1);
+        if (Number.isInteger(editor.document.lineCount) && line >= editor.document.lineCount) continue;
+        const textLine = editor.document.lineAt(line);
+        const range = new vscode.Range(line, textLine.range.end.character, line, textLine.range.end.character);
+        byKind[kind].push({ range, hoverMessage: event.label || event.kind });
+      }
+    }
+    for (const [kind, ranges] of Object.entries(byKind)) {
+      const decorationType = timelineDecorationTypes[kind];
+      if (decorationType && editor.setDecorations) editor.setDecorations(decorationType, ranges);
+    }
+  }
 }
 
 function formatDiagnosticPath(fileName) {
@@ -1207,9 +1668,10 @@ function registerHoverProvider(context) {
     provideHover(document, position) {
       const config = vscode.workspace.getConfiguration('rustOwnershipLens');
       if (!config.get('showHoverHints', true)) return undefined;
+      if (!shouldShowHoverHint(document, position, config)) return undefined;
       const line = document.lineAt(position.line).text;
       for (const hint of SIMPLE_HINTS) {
-        if (hint.test(line)) {
+        if (hint.test(line) && isPositionNearHint(line, position.character, hint.name)) {
           const md = new vscode.MarkdownString(hint.markdown);
           md.isTrusted = false;
           return new vscode.Hover(md);
@@ -1229,19 +1691,225 @@ function registerCodeActionProvider(context) {
     provideCodeActions(document, range) {
       const lineNumber = range && range.start && Number.isInteger(range.start.line) ? range.start.line : 0;
       const line = document.lineAt(lineNumber).text;
-      const parsed = parseMovableForLoopLine(line);
-      if (!parsed) return [];
+      const actions = [];
 
-      return [
-        makeForLoopQuickFix(document, lineNumber, parsed, `&${parsed.collection}`, 'Rust Ownership Lens: iterate by shared reference'),
-        makeForLoopQuickFix(document, lineNumber, parsed, `&mut ${parsed.collection}`, 'Rust Ownership Lens: iterate by mutable reference')
-      ];
+      for (const edit of collectCodeActionEdits(document, lineNumber)) {
+        const action = new vscode.CodeAction(edit.title, vscode.CodeActionKind.QuickFix);
+        const workspaceEdit = new vscode.WorkspaceEdit();
+        workspaceEdit.replace(document.uri, new vscode.Range(edit.line, edit.start, edit.line, edit.end), edit.replacement);
+        action.edit = workspaceEdit;
+        action.isPreferred = true;
+        actions.push(action);
+      }
+
+      const parsed = parseMovableForLoopLine(line);
+      if (parsed) {
+        // Prefer borrowing fixes over broad clone-based suggestions; clones are not offered automatically.
+        actions.push(
+          makeForLoopQuickFix(document, lineNumber, parsed, `&${parsed.collection}`, 'Rust Ownership Lens: iterate by shared reference'),
+          makeForLoopQuickFix(document, lineNumber, parsed, `&mut ${parsed.collection}`, 'Rust Ownership Lens: iterate by mutable reference')
+        );
+      }
+      return actions;
     }
   }, {
     providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
   });
 
   context.subscriptions.push(provider);
+}
+
+function shouldShowHoverHint(document, position, config) {
+  const line = document.lineAt(position.line).text;
+  if (isCommentOrStringPosition(line, position.character)) return false;
+  if (config.get('hoverOnlyOnDiagnostics', true) && !hasDiagnosticOnLine(document.uri.fsPath, position.line)) return false;
+  return true;
+}
+
+function hasDiagnosticOnLine(fileName, lineNumber) {
+  const target = path.normalize(fileName);
+  for (const diagnostic of lastDiagnostics || []) {
+    for (const span of diagnosticSpans(diagnostic)) {
+      if (!span || !span.file_name) continue;
+      if (resolveDiagnosticFile(span.file_name, lastRunCwd) === target && (span.line_start || 1) - 1 === lineNumber) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isCommentOrStringPosition(line, character) {
+  const before = line.slice(0, character);
+  const commentIndex = line.indexOf('//');
+  if (commentIndex >= 0 && commentIndex <= character) return true;
+  const quoteCount = (before.match(/(?<!\\)"/g) || []).length;
+  return quoteCount % 2 === 1;
+}
+
+function isPositionNearHint(line, character, hintName) {
+  const tests = {
+    '&mut': /&\s*mut\b/g,
+    '&': /(^|[^&])&[A-Za-z_][A-Za-z0-9_]*(\b|\[|\.)/g,
+    'for-in': /\bfor\s+\w+\s+in\s+(?!&)([A-Za-z_][A-Za-z0-9_]*)\b/g,
+    clone: /\.clone\s*\(\s*\)/g,
+    'tokio-spawn': /\b(tokio::spawn|task::spawn|spawn)\s*\(\s*async\b/g
+  };
+  const pattern = tests[hintName];
+  if (!pattern) return true;
+  for (const match of line.matchAll(pattern)) {
+    const start = match.index || 0;
+    const end = start + match[0].length;
+    if (character >= start && character <= end) return true;
+  }
+  return false;
+}
+
+function collectCodeActionEdits(document, lineNumber) {
+  const edits = [];
+  for (const diagnostic of lastDiagnostics || []) {
+    edits.push(...collectSuggestedReplacementEdits(diagnostic, document.uri.fsPath, lineNumber));
+  }
+  return edits;
+}
+
+function onTextDocumentSaved(document) {
+  if (!document || document.languageId !== 'rust') return;
+  const config = vscode.workspace.getConfiguration('rustOwnershipLens');
+  if (!config.get('runOnSave', false)) return;
+  if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(() => {
+    saveDebounceTimer = undefined;
+    runCargoCheck();
+  }, RUN_ON_SAVE_DEBOUNCE_MS);
+}
+
+async function explainDependency() {
+  const folder = getWorkspaceFolder();
+  if (!folder) {
+    vscode.window.showWarningMessage('Open a Rust workspace folder first.');
+    return;
+  }
+  const crateName = await vscode.window.showInputBox({
+    prompt: 'Crate name to explain',
+    placeHolder: 'serde'
+  });
+  if (!crateName) return;
+
+  const cwd = findCargoRoot(folder.uri.fsPath, folder.uri.fsPath) || folder.uri.fsPath;
+  const inverted = await runProcess('cargo', ['tree', '--invert', crateName], cwd, { timeoutMs: 120000 });
+  const features = await runProcess('cargo', ['tree', '-e', 'features'], cwd, { timeoutMs: 120000 });
+  const text = [
+    `Rust Ownership Lens: dependency ${crateName}`,
+    '==========================================',
+    '',
+    'Dependency path:',
+    '```text',
+    (inverted.stdout || inverted.stderr || '(no cargo tree output)').trimEnd(),
+    '```',
+    '',
+    'Feature activation tree:',
+    '```text',
+    (features.stdout || features.stderr || '(no cargo feature output)').trimEnd(),
+    '```',
+    '',
+    'Review tips:',
+    '- If a default feature pulls in too much, consider `default-features = false`.',
+    '- Prefer feature flags that match the code path actually used by this workspace.',
+    '- Treat this as Cargo output first; Rust Ownership Lens only formats the tree.'
+  ].join('\n');
+  lastReportText = text;
+  lastReportHtml = textReportHtml('Rust Ownership Lens: Dependency', text, { cwd });
+  outputChannel.clear();
+  outputChannel.appendLine(text);
+  outputChannel.show(true);
+  viewProvider.update(lastReportHtml, lastReportText);
+}
+
+async function expandMacroAtCursor() {
+  const folder = getWorkspaceFolder();
+  if (!folder) {
+    vscode.window.showWarningMessage('Open a Rust workspace folder first.');
+    return;
+  }
+  const cwd = findCargoRoot(folder.uri.fsPath, folder.uri.fsPath) || folder.uri.fsPath;
+  try {
+    await runProcess('cargo', ['expand', '--version'], cwd, { timeoutMs: 30000 });
+  } catch (_) {
+    vscode.window.showWarningMessage('cargo-expand is not installed. Install it with: cargo install cargo-expand');
+    return;
+  }
+
+  const result = await runWithProgress('Rust Ownership Lens: cargo expand', (_progress, token) => {
+    return runProcess('cargo', ['expand'], cwd, { timeoutMs: 300000, token });
+  });
+  const doc = await vscode.workspace.openTextDocument({
+    language: 'rust',
+    content: result.stdout || result.stderr || '// cargo expand produced no output'
+  });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
+async function showRustExplain(code) {
+  if (!/^E\d{4}$/.test(code)) return;
+  try {
+    const result = await runProcess('rustc', ['--explain', code], process.cwd(), { timeoutMs: 60000 });
+    const text = [
+      `rustc --explain ${code}`,
+      '='.repeat(`rustc --explain ${code}`.length),
+      '',
+      (result.stdout || result.stderr || '(rustc returned no explanation)').trimEnd()
+    ].join('\n');
+    lastReportText = text;
+    lastReportHtml = textReportHtml(`rustc --explain ${code}`, text);
+    viewProvider.update(lastReportHtml, lastReportText);
+    outputChannel.appendLine(text);
+  } catch (err) {
+    vscode.window.showErrorMessage(`rustc --explain ${code} failed: ${err.message || err}`);
+  }
+}
+
+async function explainWithLanguageModel() {
+  if (!vscode.lm || typeof vscode.lm.selectChatModels !== 'function') {
+    vscode.window.showInformationMessage('No VS Code language model provider is available.');
+    return;
+  }
+  const models = await vscode.lm.selectChatModels({});
+  const model = models && models[0];
+  if (!model) {
+    vscode.window.showInformationMessage('No VS Code language model provider is available.');
+    return;
+  }
+  const payload = {
+    diagnostics: lastDiagnostics.slice(0, 3).map((diagnostic) => ({
+      code: getCode(diagnostic),
+      message: diagnostic.message,
+      primary: getPrimarySpan(diagnostic),
+      children: diagnostic.children
+    })),
+    deterministicReport: lastReportText.slice(0, 8000)
+  };
+  const prompt = [
+    'Explain these Rust compiler diagnostics for a developer.',
+    'Use the compiler JSON and deterministic report as the source of truth.',
+    'Do not invent compiler behavior. Label any fix ranking as AI-assisted and not compiler-verified.',
+    '',
+    JSON.stringify(payload, null, 2)
+  ].join('\n');
+
+  try {
+    const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+    const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+    let text = 'AI-assisted explanation (not compiler-verified)\n================================================\n\n';
+    for await (const fragment of response.text) {
+      text += fragment;
+    }
+    lastReportText = `${lastReportText}\n\n${text}`;
+    lastReportHtml = textReportHtml('Rust Ownership Lens', lastReportText, { cwd: lastRunCwd });
+    viewProvider.update(lastReportHtml, lastReportText);
+  } catch (err) {
+    vscode.window.showErrorMessage(`AI explanation failed: ${err.message || err}`);
+  }
 }
 
 function makeForLoopQuickFix(document, lineNumber, parsed, replacement, title) {
@@ -1316,6 +1984,12 @@ class RustLensViewProvider {
         vscode.window.showInformationMessage('Rust Ownership Lens explanation copied.');
       } else if (message.command === 'explainSelection') {
         await explainSelection();
+      } else if (message.command === 'openLocation') {
+        await openReportLocation(message.file, message.line, message.column);
+      } else if (message.command === 'explainError') {
+        await showRustExplain(message.code);
+      } else if (message.command === 'aiExplain') {
+        await explainWithLanguageModel();
       }
     });
   }
@@ -1331,6 +2005,7 @@ class RustLensViewProvider {
 
 function shellHtml(webview, innerHtml) {
   const nonce = getNonce();
+  const aiButton = vscode.lm ? '<button id="ai">AI explain</button>' : '';
   const csp = [
     `default-src 'none'`,
     `style-src ${webview.cspSource} 'unsafe-inline'`,
@@ -1372,6 +2047,18 @@ function shellHtml(webview, innerHtml) {
       cursor: pointer;
     }
     button:hover { background: var(--vscode-button-hoverBackground); }
+    button.linkish {
+      border: 0;
+      background: transparent;
+      color: var(--vscode-textLink-foreground);
+      padding: 0;
+      font: inherit;
+      text-decoration: underline;
+    }
+    button.linkish:hover {
+      background: transparent;
+      color: var(--vscode-textLink-activeForeground);
+    }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
@@ -1393,6 +2080,7 @@ function shellHtml(webview, innerHtml) {
     <button id="run">Run cargo check</button>
     <button id="selection">Explain selection</button>
     <button id="copy">Copy</button>
+    ${aiButton}
   </div>
   <main>${innerHtml}</main>
   <script nonce="${nonce}">
@@ -1400,6 +2088,23 @@ function shellHtml(webview, innerHtml) {
     document.getElementById('run').addEventListener('click', () => vscode.postMessage({ command: 'runCheck' }));
     document.getElementById('selection').addEventListener('click', () => vscode.postMessage({ command: 'explainSelection' }));
     document.getElementById('copy').addEventListener('click', () => vscode.postMessage({ command: 'copy' }));
+    const ai = document.getElementById('ai');
+    if (ai) ai.addEventListener('click', () => vscode.postMessage({ command: 'aiExplain' }));
+    document.addEventListener('click', (event) => {
+      const target = event.target.closest('[data-open-location], [data-explain-code]');
+      if (!target) return;
+      event.preventDefault();
+      if (target.dataset.openLocation) {
+        vscode.postMessage({
+          command: 'openLocation',
+          file: target.dataset.file,
+          line: Number(target.dataset.line),
+          column: Number(target.dataset.column)
+        });
+      } else if (target.dataset.explainCode) {
+        vscode.postMessage({ command: 'explainError', code: target.dataset.explainCode });
+      }
+    });
   </script>
 </body>
 </html>`;
@@ -1428,20 +2133,52 @@ function welcomeHtml() {
   return textReportHtml('Rust Ownership Lens', welcomeText());
 }
 
-function loadingHtml(cwd, command, args) {
+function loadingHtml(cwd, command, args, mode) {
   const text = [
     'Running cargo check...',
     '',
     `Workspace: ${cwd}`,
     `Command: ${command} ${args.join(' ')}`,
+    mode ? `Mode: ${mode}` : '',
     '',
     'Waiting for cargo JSON diagnostics.'
-  ].join('\n');
-  return textReportHtml('Running', text);
+  ].filter((line) => line !== '').join('\n');
+  return textReportHtml('Running', text, { cwd });
 }
 
-function textReportHtml(title, text) {
-  return `<h2>${escapeHtml(title)}</h2><pre>${escapeHtml(text)}</pre>`;
+function textReportHtml(title, text, options = {}) {
+  return `<h2>${escapeHtml(title)}</h2><pre>${linkifyReportText(text, options.cwd)}</pre>`;
+}
+
+function linkifyReportText(text, cwd) {
+  const regex = /(rustc --explain (E\d{4}))|((?:[A-Za-z]:\\|\\\\|\/|\.{1,2}\/|[A-Za-z0-9_.-]+\/)[^\s:`]+\.rs):(\d+):(\d+)/g;
+  let html = '';
+  let lastIndex = 0;
+  for (const match of String(text).matchAll(regex)) {
+    html += escapeHtml(String(text).slice(lastIndex, match.index));
+    if (match[1]) {
+      html += `<button class="linkish" data-explain-code="${escapeHtml(match[2])}">${escapeHtml(match[1])}</button>`;
+    } else {
+      const display = `${match[3]}:${match[4]}:${match[5]}`;
+      const file = resolveDiagnosticFile(match[3], cwd);
+      html += `<button class="linkish" data-open-location="1" data-file="${escapeHtml(file)}" data-line="${escapeHtml(match[4])}" data-column="${escapeHtml(match[5])}">${escapeHtml(display)}</button>`;
+    }
+    lastIndex = match.index + match[0].length;
+  }
+  html += escapeHtml(String(text).slice(lastIndex));
+  return html;
+}
+
+async function openReportLocation(fileName, line, column) {
+  if (!fileName || !vscode.Uri || !vscode.Range) return;
+  const lineIndex = Math.max(0, Number(line || 1) - 1);
+  const columnIndex = Math.max(0, Number(column || 1) - 1);
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(fileName));
+  const editor = await vscode.window.showTextDocument(document, { preview: true });
+  const position = new vscode.Position(lineIndex, columnIndex);
+  const range = new vscode.Range(position, position);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
 function escapeHtml(value) {
@@ -1478,11 +2215,16 @@ module.exports = {
     heuristicFindings,
     getCargoRunConfig,
     hasJsonMessageFormat,
+    deduplicateDiagnostics,
+    prioritizeDiagnostics,
+    isKnownDiagnostic,
     resolveCommandForSpawn,
     getCode,
     guessVariable,
     formatDiagnosticPath,
     formatSpanLocation,
+    diagnosticSummary,
+    linkifyReportText,
     isForLoopIteratorMoveDiagnostic,
     parseMovableForLoopLine,
   }
