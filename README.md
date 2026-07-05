@@ -15,7 +15,7 @@ It is designed as a developer tool for people who are new to Rust but still need
 
 ## Supported errors in this prototype
 
-- `E0382`: use of moved value
+- `E0382`: use of moved value, including `for item in collection` iterator moves
 - `E0499`: cannot borrow as mutable more than once
 - `E0502`: mutable borrow conflicts with immutable borrow
 - `E0505`: cannot move out because it is borrowed

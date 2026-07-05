@@ -140,6 +140,7 @@ function activate(context) {
   );
 
   registerHoverProvider(context);
+  registerCodeActionProvider(context);
   viewProvider.update(welcomeHtml(), welcomeText());
 }
 
@@ -501,6 +502,9 @@ function templateForDiagnostic(code, variable, diagnostic, events) {
       ].join('\n');
 
     case 'E0382':
+      if (isForLoopIteratorMoveDiagnostic(diagnostic)) {
+        return iteratorMoveTemplate(v, diagnostic, events);
+      }
       return [
         'Problem:',
         `  ${v} was moved, then used again.`,
@@ -668,6 +672,41 @@ function templateForDiagnostic(code, variable, diagnostic, events) {
   }
 }
 
+function iteratorMoveTemplate(variable, diagnostic, events) {
+  const context = findForLoopIteratorMoveContext(diagnostic, variable);
+  const collection = context.collection || variable || 'collection';
+  const item = context.item || 'item';
+  const timeline = renderEventTimeline(events, collection);
+
+  return [
+    'Problem:',
+    `  The for loop moved ${collection} by calling \`.into_iter()\`, then ${collection} was used again.`,
+    '',
+    'Iterator ownership ASCII:',
+    '```text',
+    `${collection} before loop: owns Vec<T>`,
+    `for ${item} in ${collection}`,
+    `${' '.repeat(4 + item.length + 4)}^ calls IntoIterator::into_iter(${collection})`,
+    `${collection} moved into the loop iterator`,
+    `later use of ${collection}: X`,
+    '```',
+    '',
+    'Iterator choices:',
+    '```text',
+    `for ${item} in ${collection}      -> into_iter(), moves the owned collection`,
+    `for ${item} in &${collection}     -> iter(), reads borrowed items`,
+    `for ${item} in &mut ${collection} -> iter_mut(), edits items without moving the Vec`,
+    '```',
+    '',
+    timeline,
+    '',
+    'Quick fixes:',
+    `  A. Read only: change to \`for ${item} in &${collection} { ... }\`.`,
+    `  B. Mutate elements: change to \`for ${item} in &mut ${collection} { ... }\`.`,
+    `  C. Consume intentionally: keep \`for ${item} in ${collection}\` and do not use ${collection} after the loop.`
+  ].join('\n');
+}
+
 function buildEvents(diagnostic) {
   const events = [];
   const primary = getPrimarySpan(diagnostic);
@@ -779,13 +818,25 @@ function sourceSnippet(span) {
 
 function collectSuggestions(diagnostic, code, variable) {
   const suggestions = [];
+  const addSuggestion = (suggestion) => {
+    if (suggestion && !suggestions.includes(suggestion)) suggestions.push(suggestion);
+  };
+
+  if (code === 'E0382' && isForLoopIteratorMoveDiagnostic(diagnostic)) {
+    const context = findForLoopIteratorMoveContext(diagnostic, variable);
+    const collection = context.collection || variable || 'collection';
+    const item = context.item || 'item';
+    addSuggestion(`Quick Fix: change \`for ${item} in ${collection}\` to \`for ${item} in &${collection}\` for read-only iteration`);
+    addSuggestion(`Quick Fix: change \`for ${item} in ${collection}\` to \`for ${item} in &mut ${collection}\` when mutating items`);
+  }
+
   const children = Array.isArray(diagnostic.children) ? diagnostic.children : [];
   for (const child of children) {
-    if (child && child.message && !suggestions.includes(child.message)) suggestions.push(child.message);
+    if (child && child.message) addSuggestion(child.message);
     const spans = Array.isArray(child.spans) ? child.spans : [];
     for (const span of spans) {
       if (span && span.suggested_replacement) {
-        suggestions.push(`replace code at ${span.file_name}:${span.line_start} with \`${span.suggested_replacement}\``);
+        addSuggestion(`replace code at ${span.file_name}:${span.line_start} with \`${span.suggested_replacement}\``);
       }
     }
   }
@@ -799,6 +850,81 @@ function collectSuggestions(diagnostic, code, variable) {
   }
 
   return suggestions.slice(0, 8);
+}
+
+function isForLoopIteratorMoveDiagnostic(diagnostic) {
+  if (getCode(diagnostic) !== 'E0382') return false;
+
+  const text = diagnosticSearchText(diagnostic).toLowerCase();
+  const hasIntoIter = text.includes('into_iter') || text.includes('intoiterator');
+  const hasImplicitMove = text.includes('implicit call') || text.includes('takes ownership of the receiver') || text.includes('moved due to this');
+  const hasForLoopSource = diagnosticSpans(diagnostic).some((span) => {
+    const lines = Array.isArray(span.text) ? span.text : [];
+    return lines.some((entry) => parseMovableForLoopLine(entry && entry.text ? entry.text : ''));
+  });
+  const hasForLoopHint = text.includes('consider iterating over') || text.includes('for loop') || hasForLoopSource;
+
+  return hasIntoIter && hasImplicitMove && hasForLoopHint;
+}
+
+function findForLoopIteratorMoveContext(diagnostic, fallbackCollection) {
+  const spans = diagnosticSpans(diagnostic);
+  for (const span of spans) {
+    const lines = Array.isArray(span.text) ? span.text : [];
+    for (const entry of lines) {
+      const parsed = parseMovableForLoopLine(entry && entry.text ? entry.text : '');
+      if (parsed) {
+        return { item: parsed.item, collection: parsed.collection };
+      }
+    }
+  }
+
+  const backticked = [];
+  for (const value of diagnosticTextValues(diagnostic)) {
+    for (const match of String(value || '').matchAll(/`([^`]+)`/g)) {
+      if (match[1]) backticked.push(match[1]);
+    }
+  }
+  const collection = backticked.find((value) => value === fallbackCollection)
+    || backticked.find((value) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(value))
+    || fallbackCollection
+    || 'collection';
+
+  return { item: 'item', collection };
+}
+
+function diagnosticSearchText(diagnostic) {
+  return diagnosticTextValues(diagnostic).join('\n');
+}
+
+function diagnosticTextValues(diagnostic) {
+  const values = [];
+  if (!diagnostic) return values;
+  if (diagnostic.message) values.push(diagnostic.message);
+
+  for (const span of diagnosticSpans(diagnostic)) {
+    if (span.label) values.push(span.label);
+    const lines = Array.isArray(span.text) ? span.text : [];
+    for (const entry of lines) {
+      if (entry && entry.text) values.push(entry.text);
+    }
+  }
+
+  const children = Array.isArray(diagnostic.children) ? diagnostic.children : [];
+  for (const child of children) {
+    if (child && child.message) values.push(child.message);
+  }
+  return values;
+}
+
+function diagnosticSpans(diagnostic) {
+  const spans = [];
+  if (Array.isArray(diagnostic && diagnostic.spans)) spans.push(...diagnostic.spans);
+  const children = Array.isArray(diagnostic && diagnostic.children) ? diagnostic.children : [];
+  for (const child of children) {
+    if (Array.isArray(child.spans)) spans.push(...child.spans);
+  }
+  return spans;
 }
 
 function formatCompactDiagnostic(diagnostic) {
@@ -1080,6 +1206,52 @@ function registerHoverProvider(context) {
   context.subscriptions.push(provider);
 }
 
+function registerCodeActionProvider(context) {
+  if (!vscode.languages || !vscode.languages.registerCodeActionsProvider) return;
+  if (!vscode.CodeAction || !vscode.CodeActionKind || !vscode.WorkspaceEdit || !vscode.Range) return;
+
+  const provider = vscode.languages.registerCodeActionsProvider({ language: 'rust', scheme: 'file' }, {
+    provideCodeActions(document, range) {
+      const lineNumber = range && range.start && Number.isInteger(range.start.line) ? range.start.line : 0;
+      const line = document.lineAt(lineNumber).text;
+      const parsed = parseMovableForLoopLine(line);
+      if (!parsed) return [];
+
+      return [
+        makeForLoopQuickFix(document, lineNumber, parsed, `&${parsed.collection}`, 'Rust Ownership Lens: iterate by shared reference'),
+        makeForLoopQuickFix(document, lineNumber, parsed, `&mut ${parsed.collection}`, 'Rust Ownership Lens: iterate by mutable reference')
+      ];
+    }
+  }, {
+    providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+  });
+
+  context.subscriptions.push(provider);
+}
+
+function makeForLoopQuickFix(document, lineNumber, parsed, replacement, title) {
+  const action = new vscode.CodeAction(title, vscode.CodeActionKind.QuickFix);
+  const edit = new vscode.WorkspaceEdit();
+  const range = new vscode.Range(lineNumber, parsed.collectionStart, lineNumber, parsed.collectionEnd);
+  edit.replace(document.uri, range, replacement);
+  action.edit = edit;
+  action.isPreferred = replacement.startsWith('&') && !replacement.startsWith('&mut');
+  return action;
+}
+
+function parseMovableForLoopLine(line) {
+  const match = String(line || '').match(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(?!&)([A-Za-z_][A-Za-z0-9_]*)\b/);
+  if (!match) return undefined;
+  const collection = match[2];
+  const collectionStart = match.index + match[0].lastIndexOf(collection);
+  return {
+    item: match[1],
+    collection,
+    collectionStart,
+    collectionEnd: collectionStart + collection.length
+  };
+}
+
 async function insertExampleError() {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'rust') {
@@ -1294,5 +1466,7 @@ module.exports = {
     resolveCommandForSpawn,
     getCode,
     guessVariable,
+    isForLoopIteratorMoveDiagnostic,
+    parseMovableForLoopLine,
   }
 };
