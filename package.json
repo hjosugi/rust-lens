@@ -1,0 +1,143 @@
+{
+  "name": "rust-ownership-lens",
+  "displayName": "Rust Ownership Lens",
+  "description": "Explain Rust ownership, borrowing, lifetime, iterator, and async errors with ASCII timelines.",
+  "version": "0.1.0",
+  "publisher": "local-rust-tools",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Education"
+  ],
+  "keywords": [
+    "rust",
+    "ownership",
+    "borrow-checker",
+    "lifetime",
+    "cargo",
+    "ascii"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:rust",
+    "onCommand:rustOwnershipLens.runCheck",
+    "onCommand:rustOwnershipLens.explainSelection",
+    "onCommand:rustOwnershipLens.showPanel",
+    "onView:rustOwnershipLens.view"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "rustOwnershipLens.runCheck",
+        "title": "Rust Ownership Lens: Run cargo check"
+      },
+      {
+        "command": "rustOwnershipLens.explainSelection",
+        "title": "Rust Ownership Lens: Explain Selected Rust Code"
+      },
+      {
+        "command": "rustOwnershipLens.showPanel",
+        "title": "Rust Ownership Lens: Show Panel"
+      },
+      {
+        "command": "rustOwnershipLens.copyLastExplanation",
+        "title": "Rust Ownership Lens: Copy Last Explanation"
+      },
+      {
+        "command": "rustOwnershipLens.insertExample",
+        "title": "Rust Ownership Lens: Insert Example Error"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rustOwnershipLens",
+          "title": "Rust Lens",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "rustOwnershipLens": [
+        {
+          "id": "rustOwnershipLens.view",
+          "name": "Ownership Lens",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "rustOwnershipLens.explainSelection",
+          "when": "editorLangId == rust",
+          "group": "navigation@10"
+        },
+        {
+          "command": "rustOwnershipLens.runCheck",
+          "when": "editorLangId == rust",
+          "group": "navigation@11"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rustOwnershipLens.runCheck"
+        },
+        {
+          "command": "rustOwnershipLens.explainSelection"
+        },
+        {
+          "command": "rustOwnershipLens.showPanel"
+        },
+        {
+          "command": "rustOwnershipLens.copyLastExplanation"
+        },
+        {
+          "command": "rustOwnershipLens.insertExample"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rust Ownership Lens",
+      "properties": {
+        "rustOwnershipLens.cargoCommand": {
+          "type": "string",
+          "default": "cargo",
+          "description": "Cargo command path used by Rust Ownership Lens."
+        },
+        "rustOwnershipLens.cargoArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "check",
+            "--message-format=json"
+          ],
+          "description": "Arguments passed to cargo. Keep --message-format=json so diagnostics can be parsed."
+        },
+        "rustOwnershipLens.maxDiagnostics": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of diagnostics to explain in one run."
+        },
+        "rustOwnershipLens.showHoverHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show lightweight Rust ownership hover hints."
+        },
+        "rustOwnershipLens.includeWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also include Rust warnings from cargo check output."
+        }
+      }
+    }
+  }
+}

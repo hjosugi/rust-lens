@@ -1,0 +1,20 @@
+[package]
+name = "rust-ownership-lens-examples"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "e0502"
+path = "e0502.rs"
+
+[[bin]]
+name = "e0382"
+path = "e0382.rs"
+
+[[bin]]
+name = "e0515"
+path = "e0515.rs"
+
+[[bin]]
+name = "iterator-move"
+path = "iterator-move.rs"
