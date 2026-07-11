@@ -1,3 +1,6 @@
+<!-- i18n: language-switcher -->
+[English](DESIGN.md) | [日本語](DESIGN.ja.md)
+
 # Rust Ownership Lens Design
 
 Rust Ownership Lens is built on one rule: **the compiler is the source of truth; the extension is the translator**. The extension should not try to reimplement borrow checking. It runs Rust's own tools, reads structured diagnostics, and turns those diagnostics into learner-friendly explanations, timelines, and focused editor actions.

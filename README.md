@@ -1,3 +1,6 @@
+<!-- i18n: language-switcher -->
+[English](README.md) | [日本語](README.ja.md)
+
 # Rust Ownership Lens
 
 [![CI](https://github.com/hjosugi/rust-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/hjosugi/rust-lens/actions/workflows/ci.yml)
