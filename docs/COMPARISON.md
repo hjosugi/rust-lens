@@ -1,3 +1,6 @@
+<!-- i18n: language-switcher -->
+[English](COMPARISON.md) | [日本語](COMPARISON.ja.md)
+
 # Rust Ownership Lens Comparison
 
 Rust Ownership Lens is not a replacement for Rust IDEs, linters, fixers, visualizers, or courses. Its niche is narrower: translate real compiler diagnostics for ownership and lifetime errors into concise explanations and timelines inside the editor.
