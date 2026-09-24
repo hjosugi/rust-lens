@@ -2,7 +2,7 @@
   "name": "rust-ownership-lens",
   "displayName": "Rust Ownership Lens",
   "description": "Explain Rust ownership, borrowing, lifetime, iterator, and async errors with ASCII timelines.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "hjosugi",
   "license": "0BSD",
   "icon": "media/icon.png",

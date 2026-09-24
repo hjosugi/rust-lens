@@ -4,6 +4,8 @@ This project follows Keep a Changelog-style sections: Added, Changed, Fixed, and
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-24
+
 ### Added
 
 - Added VSIX packaging via `@vscode/vsce` and an offline `scripts/package-vsix.sh` fallback.
@@ -21,6 +23,7 @@ This project follows Keep a Changelog-style sections: Added, Changed, Fixed, and
 
 - Diagnostics are de-duplicated and known ownership/lifetime errors are prioritized before `maxDiagnostics` is applied.
 - Hover hints are scoped to diagnostic lines by default to reduce rust-analyzer overlap.
+- The license is now 0BSD.
 
 ### Fixed
 
