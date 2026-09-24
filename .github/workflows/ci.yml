@@ -74,7 +74,9 @@ jobs:
         with:
           node-version: 24
       - name: Install packaging dependencies
-        run: npm install
+        run: npm ci
+      - name: Check VSIX contents
+        run: npm run check:package
       - name: Build VSIX
         run: npm run package
       - name: Upload VSIX artifact

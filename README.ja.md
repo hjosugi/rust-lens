@@ -55,10 +55,11 @@ Rust初心者でも実際のRustプロジェクトで作業する必要がある
 
 ## VSIXからインストール
 
-`.vsix`ファイルを持っている場合:
+各[GitHub Release](https://github.com/hjosugi/rust-lens/releases)に`.vsix`が添付されています。
+ダウンロードするか、下記の手順で自分でビルドしてから実行します:
 
 ```bash
-code --install-extension rust-ownership-lens-0.1.0.vsix
+code --install-extension rust-ownership-lens-<version>.vsix
 ```
 
 その後、VS Codeを再起動してください。
@@ -77,6 +78,24 @@ npm run package
 ```bash
 npm run package:offline
 ```
+
+`npm run check:package`は、`vsce`が同梱するファイルを許可リストと照合します。CIはVSIXを
+ビルドする前に毎回これを実行するので、リポジトリ用のツール類のファイルがVSIXに混入しません。
+
+## リリース手順
+
+1. `package.json`と`package-lock.json`の`version`を更新し、`CHANGELOG.md`の`Unreleased`の
+   項目を`## <version> - <date>`見出しの下へ移します。
+2. `v<version>`タグをpushします。`Release` workflowがタグと`package.json`の一致を確認し、
+   テストとVSIX内容チェックを実行してVSIXをビルドし、そのバージョンのCHANGELOG節を本文とする
+   GitHub Releaseに添付します。
+3. 同じworkflowが、リポジトリsecretの`VSCE_PAT`があればVS Code Marketplaceへ、`OVSX_PAT`が
+   あればOpen VSXへ公開します。secretがない場合は、どちらもnoticeを出してスキップします。
+   secretを追加した後に既存タグを公開するには、そのタグを指定してworkflowを手動実行します。
+
+Marketplaceのpublisherは`hjosugi`（`package.json`の`publisher`）です。`VSCE_PAT`には、その
+publisherに対する**Marketplace (Manage)** scope付きのAzure DevOps personal access tokenが
+必要です。Open VSXでは、初回公開の前に`hjosugi` namespaceを作成しておく必要があります。
 
 ## CLI
 

@@ -12,3 +12,9 @@ test/**
 *.zip
 npm-debug.log*
 package-lock.json
+AGENTS.md
+CLAUDE.md
+.claude/**
+.codex/**
+.copilot/**
+graphify-out/**

@@ -39,6 +39,7 @@
     "test:rust-compat": "node scripts/check-rust-compat.js",
     "package": "vsce package --out rust-ownership-lens-${npm_package_version}.vsix",
     "package:offline": "bash scripts/package-vsix.sh",
+    "check:package": "node scripts/check-vsix-contents.js",
     "install-local": "bash scripts/install-local.sh",
     "graphify:setup": "sh scripts/graphify.sh setup",
     "graphify:update": "sh scripts/graphify.sh update"
