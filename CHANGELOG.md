@@ -4,6 +4,10 @@ This project follows Keep a Changelog-style sections: Added, Changed, Fixed, and
 
 ## Unreleased
 
+## [0.2.1] - 2026-10-24
+
+- Update the reviewed dependencies and retain the recorded security compatibility fixes.
+
 ## 0.2.0 - 2026-09-24
 
 ### Added
