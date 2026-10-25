@@ -62,8 +62,13 @@ jobs:
         run: |
           vsix="rust-ownership-lens-${VERSION}.vsix"
           notes="$(awk -v v="$VERSION" '
-            $0 ~ "^## " v "( |$)" { found = 1; next }
-            found && /^## / { exit }
+            $1 == "##" {
+              if (found) exit
+              heading = $2
+              gsub(/^\[|\]$/, "", heading)
+              found = heading == v
+              next
+            }
             found { print }
           ' CHANGELOG.md)"
           if [ -z "$notes" ]; then
